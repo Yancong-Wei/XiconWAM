@@ -1,0 +1,16 @@
+# Multi-source pretrain shell. SFT keeps selecting a single data yaml
+# (e.g. `data: robodojo`). Add another source by composing it under
+# `sources.<name>` and enabling it below.
+defaults:
+  - robodojo@sources.robodojo
+  - _self_
+
+train:
+  _target_: xiconwam.data.mixture.build_mixture_dataset
+  weight_strategy: proportional
+  seed: 42
+  sources:
+    robodojo:
+      enabled: true
+      weight: 1.0
+      config: ${data.sources.robodojo.train}

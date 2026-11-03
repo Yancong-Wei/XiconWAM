@@ -1,0 +1,31 @@
+# Local runtime / data mounts
+/playground/
+/runs/
+/evaluate_results/
+.hydra/
+wandb/
+outputs/
+tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Logs and local secrets
+*.log
+.env
+.env.*
+credentials
+*.secret

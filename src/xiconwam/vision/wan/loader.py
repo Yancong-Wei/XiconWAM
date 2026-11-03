@@ -1,0 +1,285 @@
+from dataclasses import dataclass
+import inspect
+import time
+from typing import Any
+
+import torch
+
+from xiconwam.kit.logging_config import get_logger
+from xiconwam.actor.helpers.io import LocalModelFile, load_state_dict
+from xiconwam.vision.contract import (
+    BackboneComponents,
+    TextEncoderComponents,
+    TextEncoding,
+)
+from .action_initialization import initialize_action
+from .wan_video_dit import WanVideoDiT
+from .wan_video_text_encoder import WanHuggingfaceTokenizer, WanTextEncoder
+from .wan_video_vae import WanVideoVAE38, wan_video_vae_state_dict_converter
+
+
+logger = get_logger(__name__)
+SKIPPED_PRETRAIN_SENTINEL = "SKIPPED_PRETRAIN"
+
+
+@dataclass
+class Wan22LoadedComponents:
+    dit: WanVideoDiT
+    vae: WanVideoVAE38
+    text_encoder: WanTextEncoder | None
+    tokenizer: WanHuggingfaceTokenizer | None
+    dit_path: str
+    vae_path: str
+    text_encoder_path: str | None
+    tokenizer_path: str | None
+
+
+WAN22_MODEL_REGISTRY = [
+    {
+        # Example: LocalModelFile(root="./checkpoints/Wan2.2-TI2V-5B", pattern="models_t5_umt5-xxl-enc-bf16.pth")
+        "model_name": "wan_video_text_encoder",
+        "model_class": WanTextEncoder,
+    },
+    {
+        # Example: LocalModelFile(root="./checkpoints/Wan2.2-TI2V-5B", pattern="diffusion_pytorch_model*.safetensors")
+        "model_name": "wan_video_dit",
+        "model_class": WanVideoDiT,
+    },
+    {
+        # Example: LocalModelFile(root="./checkpoints/Wan2.2-TI2V-5B", pattern="Wan2.2_VAE.pth")
+        "model_name": "wan_video_vae",
+        "model_class": WanVideoVAE38,
+        "state_dict_converter": wan_video_vae_state_dict_converter,
+    },
+]
+
+
+def _validate_dit_config(dit_config: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(dit_config, dict):
+        raise ValueError(f"`dit_config` must be a dict, got {type(dit_config)}")
+
+    validated = dict(dit_config)
+
+    signature = inspect.signature(WanVideoDiT.__init__)
+    allowed_keys = set()
+    required_keys = set()
+    for name, param in signature.parameters.items():
+        if name == "self":
+            continue
+        allowed_keys.add(name)
+        if param.default is inspect.Signature.empty:
+            required_keys.add(name)
+
+    unknown_keys = sorted(set(validated) - allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            f"Unknown keys in `dit_config`: {unknown_keys}. "
+            f"Allowed keys: {sorted(allowed_keys)}"
+        )
+
+    missing_keys = sorted(required_keys - set(validated))
+    if missing_keys:
+        raise ValueError(
+            f"Missing required keys in `dit_config`: {missing_keys}. "
+            "Please specify all required WanVideoDiT constructor args."
+        )
+
+    return validated
+
+
+def _load_registered_model(
+    path,
+    model_name: str,
+    torch_dtype: torch.dtype,
+    device: str,
+    model_kwargs_override: dict[str, Any] | None = None,
+):
+    matched_config = None
+    for config in WAN22_MODEL_REGISTRY:
+        if config["model_name"] == model_name:
+            matched_config = config
+            break
+    if matched_config is None:
+        raise ValueError(f"Unknown Wan model name: {model_name}.")
+
+    model_class = matched_config["model_class"]
+    model_kwargs = dict(matched_config.get("extra_kwargs", {}))
+    if model_kwargs_override is not None:
+        model_kwargs.update(model_kwargs_override)
+    state_dict_converter = matched_config.get("state_dict_converter")
+
+    model = model_class(**model_kwargs)
+    state_dict = load_state_dict(path, torch_dtype=torch_dtype, device="cpu")
+    if state_dict_converter is not None:
+        state_dict = state_dict_converter(state_dict)
+
+    model.load_state_dict(state_dict, strict=False)
+    model = model.to(device=device, dtype=torch_dtype)
+    return model
+
+
+def _resolve_configs(model_id: str, tokenizer_model_id: str):
+    dit_config = LocalModelFile(model_id, "diffusion_pytorch_model*.safetensors")
+    text_config = LocalModelFile(model_id, "models_t5_umt5-xxl-enc-bf16.pth")
+    vae_config = LocalModelFile(model_id, "Wan2.2_VAE.pth")
+    tokenizer_config = LocalModelFile(tokenizer_model_id, "./")
+    return dit_config, text_config, vae_config, tokenizer_config
+
+
+def load_wan22_ti2v_5b_components(
+    device: str = "cuda",
+    torch_dtype: torch.dtype = torch.bfloat16,
+    model_id: str = "./checkpoints/Wan2.2-TI2V-5B",
+    tokenizer_model_id: str = "./checkpoints/Wan2.2-TI2V-5B/google/umt5-xxl",
+    tokenizer_max_len: int = 512,
+    dit_config: dict[str, Any] | None = None,
+    skip_dit_load_from_pretrain: bool = False,
+    load_text_encoder: bool = True,
+):
+    logger.info("Loading Wan2.2-TI2V-5B components...")
+    start = time.time()
+
+    if dit_config is None:
+        raise ValueError("`dit_config` is required for Wan2.2-TI2V-5B loading.")
+    validated_dit_config = _validate_dit_config(dit_config)
+
+    dit_model_config, text_config, vae_config, tokenizer_config = _resolve_configs(
+        model_id=model_id,
+        tokenizer_model_id=tokenizer_model_id,
+    )
+
+    vae_config.resolve()
+    if load_text_encoder:
+        text_config.resolve()
+        tokenizer_config.resolve()
+
+    if skip_dit_load_from_pretrain:
+        logger.info(
+            "Skipping pretrained video DiT load (`skip_dit_load_from_pretrain=True`); "
+            "initializing video expert randomly and expecting checkpoint override."
+        )
+        dit: WanVideoDiT = WanVideoDiT(**validated_dit_config).to(
+            device=device, dtype=torch_dtype
+        )
+        dit_path = SKIPPED_PRETRAIN_SENTINEL
+    else:
+        dit_model_config.resolve()
+        logger.info(
+            "Loading pretrained Wan2.2 video DiT from %s", dit_model_config.path
+        )
+        dit = _load_registered_model(
+            dit_model_config.path,
+            "wan_video_dit",
+            torch_dtype=torch_dtype,
+            device=device,
+            model_kwargs_override=validated_dit_config,
+        )
+        dit_path = str(dit_model_config.path)
+        logger.info("Finished loading pretrained Wan2.2 video DiT.")
+    text_encoder: WanTextEncoder | None = None
+    tokenizer: WanHuggingfaceTokenizer | None = None
+    text_encoder_path: str | None = None
+    tokenizer_path: str | None = None
+    if load_text_encoder:
+        logger.info(
+            "Loading Wan2.2 text encoder from %s and tokenizer from %s",
+            text_config.path,
+            tokenizer_config.path,
+        )
+        text_encoder = _load_registered_model(
+            text_config.path,
+            "wan_video_text_encoder",
+            torch_dtype=torch_dtype,
+            device=device,
+        )
+        tokenizer = WanHuggingfaceTokenizer(
+            name=tokenizer_config.path,
+            seq_len=int(tokenizer_max_len),
+            clean="whitespace",
+        )
+        text_encoder_path = str(text_config.path)
+        tokenizer_path = str(tokenizer_config.path)
+        logger.info("Finished loading Wan2.2 text encoder/tokenizer.")
+    else:
+        logger.info(
+            "Skipping pretrained text encoder/tokenizer load (`load_text_encoder=False`); "
+            "training must provide cached `context/context_mask`."
+        )
+    logger.info("Loading Wan2.2 video VAE from %s", vae_config.path)
+    vae: WanVideoVAE38 = _load_registered_model(
+        vae_config.path,
+        "wan_video_vae",
+        torch_dtype=torch_dtype,
+        device=device,
+    )
+    logger.info("Finished loading Wan2.2 video VAE.")
+    logger.info(
+        "Finished loading Wan2.2-TI2V-5B components in %.2f seconds.",
+        time.time() - start,
+    )
+    return Wan22LoadedComponents(
+        dit=dit,
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        dit_path=dit_path,
+        vae_path=str(vae_config.path),
+        text_encoder_path=text_encoder_path,
+        tokenizer_path=tokenizer_path,
+    )
+
+
+def load_components(cfg, *, device, torch_dtype, skip_dit_load_from_pretrain=False):
+    loaded = load_wan22_ti2v_5b_components(
+        device=str(device),
+        torch_dtype=torch_dtype,
+        model_id=cfg["model_id"],
+        tokenizer_model_id=cfg["tokenizer_model_id"],
+        tokenizer_max_len=int(cfg.get("tokenizer_max_len", 128)),
+        dit_config=dict(cfg["dit_config"]),
+        skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+        load_text_encoder=bool(cfg.get("load_text_encoder", False)),
+    )
+    return BackboneComponents(
+        name="wan22", text_dim=int(cfg["text_dim"]), **vars(loaded)
+    )
+
+
+def load_dit(cfg, *, device, torch_dtype, skip_dit_load_from_pretrain=False):
+    options = _validate_dit_config(dict(cfg["dit_config"]))
+    if skip_dit_load_from_pretrain:
+        return WanVideoDiT(**options).to(device=device, dtype=torch_dtype)
+    path = _resolve_configs(
+        model_id=cfg["model_id"], tokenizer_model_id=cfg["tokenizer_model_id"]
+    )[0]
+    path.resolve()
+    return _load_registered_model(
+        path.path, "wan_video_dit", torch_dtype, str(device), options
+    )
+
+
+def load_text_encoder(cfg, *, device, torch_dtype, context_len):
+    _, weights, _, tokenizer_path = _resolve_configs(
+        model_id=cfg["model_id"], tokenizer_model_id=cfg["tokenizer_model_id"]
+    )
+    weights.resolve()
+    tokenizer_path.resolve()
+    model = _load_registered_model(
+        weights.path,
+        "wan_video_text_encoder",
+        torch_dtype=torch_dtype,
+        device=str(device),
+    ).eval()
+    tokenizer = WanHuggingfaceTokenizer(
+        name=tokenizer_path.path, seq_len=context_len, clean="whitespace"
+    )
+
+    def encode(prompts):
+        ids, mask = tokenizer(prompts, return_mask=True, add_special_tokens=True)
+        ids = ids.to(device)
+        mask = mask.to(device=device).bool()
+        return TextEncoding(model(ids, mask), mask, mask)
+
+    return TextEncoderComponents(
+        model, encode, 16, str(weights.path), str(tokenizer_path.path)
+    )

@@ -1,0 +1,40 @@
+defaults:
+  - backbone: wan22
+  - _self_
+
+_target_: xiconwam.launch.build_model
+architecture: hide
+attention_backend: ${model.backbone.attention_backend}
+state_dim: 48
+action_dim: 48
+state_position: sequence
+projector_hidden_dim: 64
+action_dit_pretrained_path: ${model.backbone.action_dit_pretrained_path}
+skip_dit_load_from_pretrain: false
+action_dit_config: ${model.backbone.action_expert}
+video_scheduler: ${model.backbone.video_scheduler}
+
+# Fixed noise level used only to read video features. 1.0 is the pure-noise end.
+feature_timestep: 1.0
+extract_layer: ${model.backbone.video_hidden_layer}
+
+# Action sampling for the copied video expert used as the action head.
+repeated_diffusion_steps: 1
+action_inference_steps: 4
+noise_beta_alpha: 1.5
+noise_beta_beta: 1.0
+noise_s: 0.999
+
+group_learning_rate:
+  video: 1.0e-5
+  action: 1.0e-4
+
+loss:
+  lambda_video: ${model.backbone.loss.lambda_video}
+  lambda_action: ${model.backbone.loss.lambda_action}
+
+lora:
+  enable: false
+  target: video
+  rank: 16
+  alpha: 32

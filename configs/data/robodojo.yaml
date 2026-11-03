@@ -1,0 +1,69 @@
+train:
+  _target_: xiconwam.data.lerobot.robot_video_dataset.EpisodeWindowDataset
+  dataset_dirs:
+    - ./playground/datasets/robodojo
+  shape_meta:
+    images:
+      - key: cam_high
+        raw_shape: [3, 480, 640]
+        shape: [3, 256, 320]
+      - key: cam_left_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 128, 160]
+      - key: cam_right_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 128, 160]
+    # Disk raw width. Slots in the fixed 48-d head come from unify_action_map.
+    action:
+      - key: default
+        raw_shape: 14
+        shape: 14
+    state:
+      - key: default
+        raw_shape: 14
+        shape: 14
+  # Dual-arm joints -> unify slots 0-13. Model UNIFY_DIM is fixed; do not set it here.
+  unify_action_map: ["0-13"]
+  unify_state_map: null
+  num_frames: 33
+  global_sample_stride: 1
+  action_video_freq_ratio: 4
+  video_size: [384, 320]
+  camera_key: null
+  camera_layout: [cam_high, cam_left_wrist, cam_right_wrist]
+  val_set_proportion: 0.01
+  is_training_set: true
+  pretrained_norm_stats: ./playground/datasets/robodojo/dataset_stats.json
+  skip_padding_as_possible: false
+  concat_multi_camera: robotwin
+  load_text_encoder_on_miss: true
+  backbone: ${model.backbone}
+  processor:
+    _target_: xiconwam.data.lerobot.processors.window_packer.WindowPacker
+    shape_meta: ${data.train.shape_meta}
+    num_obs_steps: ${data.train.num_frames}
+    stack_images: false
+    include_gt_action: false
+    action_output_dim: ${model.backbone.action_expert.action_dim}
+    proprio_output_dim: ${model.state_dim}
+    action_state_transforms: null
+    use_stepwise_action_norm: false
+    norm_default_mode: z-score
+    norm_exception_mode: null
+    action_state_merger:
+      _target_: xiconwam.data.lerobot.transforms.action_state_merger.ConcatLeftAlign
+      action_target_dim: ${data.train.processor.action_output_dim}
+      state_target_dim: ${data.train.processor.proprio_output_dim}
+      unify_action_map: ${data.train.unify_action_map}
+      unify_state_map: ${data.train.unify_state_map}
+    # Train adds this jitter. Val uses the same resize without jitter.
+    # Resize targets come from shape_meta, so cameras are not repeated here.
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.0
+  text_embedding_cache_dir: ./playground/datasets/text_embeds_cache/robodojo/${model.backbone.name}
+  context_len: ${model.backbone.tokenizer_max_len}
+  text_encoder_id: ${model.backbone.text_encoder_id}
+  mixed_precision: ${mixed_precision}

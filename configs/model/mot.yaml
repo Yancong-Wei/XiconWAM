@@ -1,0 +1,29 @@
+defaults:
+  - backbone: wan22
+  - _self_
+
+_target_: xiconwam.launch.build_model
+architecture: mot
+attention_backend: ${model.backbone.attention_backend}
+state_dim: 48
+state_position: sequence
+projector_hidden_dim: 64
+action_dit_pretrained_path: ${model.backbone.action_dit_pretrained_path}
+skip_dit_load_from_pretrain: false
+action_dit_config: ${model.backbone.action_expert}
+video_scheduler: ${model.backbone.video_scheduler}
+
+action_scheduler:
+  train_shift: 5.0
+  infer_shift: 5.0
+  num_train_timesteps: 1000
+
+loss:
+  lambda_video: ${model.backbone.loss.lambda_video}
+  lambda_action: ${model.backbone.loss.lambda_action}
+
+lora:
+  enable: false
+  target: video
+  rank: 16
+  alpha: 32
