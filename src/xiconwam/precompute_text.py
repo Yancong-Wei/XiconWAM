@@ -8,7 +8,6 @@ import os
 import uuid
 from pathlib import Path
 
-import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 from hydra import compose, initialize_config_dir
@@ -16,7 +15,7 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-from xiconwam.data.lerobot.lerobot.datasets.utils import load_info
+from xiconwam.data.lerobot.lerobot.datasets.utils import load_info, load_tasks
 from xiconwam.data.lerobot.prompts import DEFAULT_PROMPT
 from xiconwam.data.lerobot.text_embedding_cache import (
     build_text_embedding_payload,
@@ -67,16 +66,12 @@ def read_unique_prompts(dataset_dirs: list[str]) -> list[str]:
         version = str(load_info(root).get("codebase_version"))
         if version != "v3.0":
             raise ValueError(f"Unsupported dataset version {version!r} at {root}.")
-        table = pq.ParquetFile(root / "meta/tasks.parquet")
-        names = table.schema_arrow.names
-        if "task" not in names:
-            raise ValueError(f"Missing task column in {root / 'meta/tasks.parquet'}.")
-        for batch in table.iter_batches(columns=["task"]):
-            for task in batch.column(0).to_pylist():
-                prompt = DEFAULT_PROMPT.format(task=str(task))
-                if prompt not in seen:
-                    seen.add(prompt)
-                    prompts.append(prompt)
+        tasks, _ = load_tasks(root)
+        for task in tasks.values():
+            prompt = DEFAULT_PROMPT.format(task=str(task))
+            if prompt not in seen:
+                seen.add(prompt)
+                prompts.append(prompt)
     return prompts
 
 
