@@ -67,12 +67,24 @@ def build_initialization(cfg, *, device: str, dtype: torch.dtype, alpha: bool):
     return initialize_action(backbone, action, visual, alpha=alpha)
 
 
+def configured_output(cfg) -> Path:
+    raw = cfg.model.backbone.get("action_dit_pretrained_path")
+    text = "" if raw is None else str(raw).strip()
+    if text.lower() in {"", "none", "null"}:
+        raise SystemExit(
+            "backbone.action_dit_pretrained_path is empty. Pass --output."
+        )
+    path = Path(text)
+    if not path.is_absolute():
+        path = project_root() / path
+    return path
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Resize a video DiT into an ActionExpert initialization file."
     )
-    parser.add_argument("--config-name", default="task/robodojo")
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--config-name", default="task/robodojo_wan")
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--dtype", default="float32", choices=("float32", "float16", "bfloat16")
@@ -81,13 +93,19 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args(argv)
     cfg = compose_task(args.config_name, list(args.overrides))
+    output = configured_output(cfg)
+    backbone_cfg, _ = action_expert_spec(cfg)
+    weight = backbone_cfg.get("model_path") or backbone_cfg.get("model_id")
+    print(
+        f"backbone={backbone_cfg.get('name')} weights={weight} output={output}",
+        flush=True,
+    )
     payload = build_initialization(
         cfg,
         device=args.device,
         dtype=_dtype(args.dtype),
         alpha=_bool(args.alpha_scaling),
     )
-    output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, output)
     counts = payload.get("initialization", {})

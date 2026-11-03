@@ -1,0 +1,63 @@
+# @package _global_
+defaults:
+  - /data: robodojo
+  - /model: mot
+  - override /model/backbone: cosmos25
+  - _self_
+
+output_dir: ./runs/${now:%Y-%m-%d_%H-%M-%S}
+
+batch_size: 16
+num_workers: 8
+dataloader_prefetch_factor: 2
+dataloader_persistent_workers: true
+dataloader_pin_memory: true
+dataloader_worker_threads: 1
+
+lr_scheduler_type: cosine
+learning_rate: 1.0e-4
+warmup_ratio: 0.05
+max_steps: 30000
+max_epochs: null
+log_every: 100
+save_every: 3000
+checkpoint_save_limit: 3
+eval_every: 1000
+eval_num_inference_steps: 10
+eval_save_video: false
+
+gradient_accumulation_steps: 1
+mixed_precision: bf16
+seed: 42
+max_grad_norm: 1.0
+weight_decay: 1.0e-2
+resume: null
+
+zero: 2
+zero_offload: false
+
+vae_micro_batch_size: null
+inference_cross_kv_reuse: true
+
+wandb:
+  enabled: false
+  workspace: null
+  project: xiconwam
+  name: train
+  group: null
+  mode: online
+
+model:
+  backbone:
+    use_gradient_checkpointing: false
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    handlers:
+      file:
+        filename: /dev/null

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Train from a task YAML. The task file selects data and model configs.
-# GPU ids follow StarVLA: CUDA_VISIBLE_DEVICES / GPU_IDS.
+# Default is 8 GPUs. Override with GPU_IDS / CUDA_VISIBLE_DEVICES.
 #
-#   bash scripts/train_from_yaml.sh configs/task/robodojo_a800.yaml
-#   GPU_IDS=0,1 bash scripts/train_from_yaml.sh configs/task/robodojo.yaml max_steps=1000
+#   bash scripts/train_from_yaml.sh configs/task/robodojo_wan.yaml
+#   GPU_IDS=0,1 bash scripts/train_from_yaml.sh configs/task/robodojo_wan.yaml max_steps=1000
 #   ACCELERATE_CONFIG=none GPU_IDS=0 bash scripts/train_from_yaml.sh configs/task/robodojo_a800.yaml
 set -euo pipefail
 
@@ -32,7 +32,8 @@ if [[ "$(cd "$(dirname "${CONFIG_YAML}")" && pwd)" != "${TASK_DIR}" ]]; then
   exit 2
 fi
 
-GPU_IDS="${GPU_IDS:-${CUDA_VISIBLE_DEVICES:-0}}"
+DEFAULT_GPU_IDS="0,1,2,3,4,5,6,7"
+GPU_IDS="${GPU_IDS:-${CUDA_VISIBLE_DEVICES:-${DEFAULT_GPU_IDS}}}"
 export CUDA_VISIBLE_DEVICES="${GPU_IDS}"
 IFS=',' read -r -a GPU_ARR <<< "${GPU_IDS}"
 NPROC="${NPROC:-${#GPU_ARR[@]}}"

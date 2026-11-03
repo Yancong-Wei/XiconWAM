@@ -2,6 +2,7 @@
 defaults:
   - /data: robodojo
   - /model: mot
+  - override /model/backbone: flux2
   - _self_
 
 output_dir: ./runs/${now:%Y-%m-%d_%H-%M-%S}

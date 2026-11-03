@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Precompute frozen text embeddings for a task."
     )
-    parser.add_argument("--config-name", default="task/robodojo")
+    parser.add_argument("--config-name", default="task/robodojo_wan")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args(argv)

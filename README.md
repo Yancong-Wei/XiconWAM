@@ -7,7 +7,7 @@ Supported policy heads: **`mot`** (default), **`idm`**, **`hide`**.
 Primary benchmark integration: **RoboDojo** (LeRobot v3.0, joint14, three cameras).
 
 Validated stack: Linux, Python 3.10, PyTorch 2.7.1+cu128, torchvision 0.22.1+cu128 (CUDA 12.8).  
-Single-GPU 80GB recipe: `configs/task/robodojo_a800.yaml`.
+Default launch uses **8 GPUs**. Single-GPU 80GB recipe: `configs/task/robodojo_a800.yaml`.
 
 > RoboDojo alone is about 112 GiB before vision weights. Keep datasets and checkpoints on a data disk, then symlink them into `playground/`.
 
@@ -35,11 +35,14 @@ python -m pip install -e . --extra-index-url https://download.pytorch.org/whl/cu
 
 ### uv
 
+The checked environment is `XiconWAM/.venv` (Python 3.10.12). Ordinary packages come from the Tsinghua PyPI mirror. `torch==2.7.1+cu128` and `torchvision==0.22.1+cu128` are not on that mirror; `pyproject.toml` sends only those two packages to `https://download.pytorch.org/whl/cu128`.
+
 ```bash
-uv python install 3.10
-uv venv --python 3.10 .venv
+uv venv --python /usr/bin/python3.10 .venv
+UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+  UV_PROJECT_ENVIRONMENT="$PWD/.venv" \
+  uv sync
 source .venv/bin/activate
-uv sync --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 
 Verify GPU visibility:
@@ -56,12 +59,15 @@ python -m pip install flash-attn --no-build-isolation
 
 ## 2. Data and pretrained weights
 
-Large assets should live outside the git tree:
+Large assets should live outside the git tree, then symlink into `playground/`:
 
 ```bash
-mkdir -p /data/xiconwam
-ln -sfn /data/xiconwam/datasets playground/datasets
-ln -sfn /data/xiconwam/pretrained_models playground/pretrained_models
+mkdir -p playground/datasets playground/pretrained_models
+# RoboDojo joint14 (this machine)
+ln -sfn /mnt/pangyunyi/datasets/robodojo-joint playground/datasets/robodojo
+# Or a generic data root:
+# ln -sfn /data/xiconwam/datasets/robodojo playground/datasets/robodojo
+# ln -sfn /data/xiconwam/pretrained_models playground/pretrained_models
 ```
 
 Expected pretrained layout (no extra nesting):
@@ -72,6 +78,21 @@ playground/pretrained_models/ActionDiT_Wan22_5b.pt
 playground/pretrained_models/Cosmos-Predict2.5-2B/
 playground/pretrained_models/Cosmos-Reason1-7B/
 playground/pretrained_models/ActionDiT_Cosmos25_2b.pt
+playground/pretrained_models/flux2/
+playground/pretrained_models/ActionDiT_Flux2_4b.pt
+```
+
+### Dataset normalization stats
+
+Training reads `playground/datasets/robodojo/dataset_stats.json` (XiconWAM format with
+`action` / `state` → `default` → `global_mean` / `global_std` / …).  
+Do **not** rename LeRobot `meta/stats.json`. Compute it once:
+
+```bash
+python scripts/compute_dataset_stats.py
+# or:
+python scripts/compute_dataset_stats.py --config-name task/robodojo_wan \
+  --output playground/datasets/robodojo/dataset_stats.json
 ```
 
 ### ModelScope helpers
@@ -99,47 +120,54 @@ hf download OpenMOSS-Team/robodojo-lerobot-v3.0 \
 
 FLUX weights belong under `playground/pretrained_models/flux2/`; see `configs/model/backbone/flux2.yaml`. The `hide` policy needs cross-attention on the action expert and is not wired for FLUX.
 
-If the action-expert checkpoint is missing or the vision tower changed, rebuild it:
+Action DiT files are initializations resized from the video tower, not trained checkpoints. The task YAML selects the tower and `action_dit_pretrained_path`, and the script saves there. Run from the repository root with `.venv` active (`source .venv/bin/activate`); the script calls `python` on `PATH`.
 
 ```bash
-bash scripts/prepare_action_expert.sh configs/task/robodojo.yaml wan22 \
-  playground/pretrained_models/ActionDiT_Wan22_5b.pt
-bash scripts/prepare_action_expert.sh configs/task/robodojo.yaml cosmos25 \
-  playground/pretrained_models/ActionDiT_Cosmos25_2b.pt
+bash scripts/prepare_action_expert.sh configs/task/robodojo_wan.yaml
+bash scripts/prepare_action_expert.sh configs/task/robodojo_cosmos.yaml
+bash scripts/prepare_action_expert.sh configs/task/robodojo_flux.yaml
 ```
 
-Training reads cached text embeddings only. Rebuild after switching towers:
+`robodojo_wan` uses Wan2.2 and writes `ActionDiT_Wan22_5b.pt`. `robodojo_cosmos` uses Cosmos-Predict2.5-2B and writes `ActionDiT_Cosmos25_2b.pt`. `robodojo_flux` uses FLUX.2-klein-base-4B and writes `ActionDiT_Flux2_4b.pt`. All three files land in `playground/pretrained_models/`. FLUX also reads `flux2/FLUX.2-dev/ae.safetensors`. Its text encoder spec is `Qwen/Qwen3-4B`, loaded only when `load_text_encoder` is true.
+
+Training reads cached text embeddings. Rebuild the cache after switching towers:
 
 ```bash
-bash scripts/precompute_text_embeds.sh configs/task/robodojo.yaml wan22
-bash scripts/precompute_text_embeds.sh configs/task/robodojo.yaml cosmos25
+bash scripts/precompute_text_embeds.sh configs/task/robodojo_wan.yaml
+bash scripts/precompute_text_embeds.sh configs/task/robodojo_cosmos.yaml
+bash scripts/precompute_text_embeds.sh configs/task/robodojo_flux.yaml
 ```
 
 Caches are written to `playground/datasets/text_embeds_cache/robodojo/<backbone>/`.
 
 ## 3. Training
 
-A task config selects data, model, batch size, learning rate, schedule, and ZeRO settings. `robodojo_a800` inherits from `robodojo`. Validation reuses the train dataset config with `is_training_set=false`.
+A task config selects data, model, batch size, learning rate, schedule, and ZeRO settings. `robodojo_wan`, `robodojo_cosmos`, and `robodojo_flux` share those settings and pin the vision tower. `robodojo_a800` inherits from `robodojo_wan` for single-GPU 80GB. Validation reuses the train dataset config with `is_training_set=false`.
 
 ```text
-configs/task/robodojo.yaml
+configs/task/robodojo_wan.yaml       # backbone wan22 (default 8-GPU entry)
+configs/task/robodojo_cosmos.yaml    # backbone cosmos25
+configs/task/robodojo_flux.yaml      # backbone flux2
+configs/task/robodojo_a800.yaml      # single-GPU 80GB override
   data/robodojo          # single-source SFT
   data/mixture           # multi-source pretrain shell
   model/mot | idm | hide
-    backbone  wan22 | cosmos25 | flux2
 ```
 
 Action / state heads use a fixed `UNIFY_DIM=48`. Datasets only declare `unify_action_map` (RoboDojo joints: `["0-13"]`). Missing cameras are filled with black frames. Text-cache misses can fall back to online encoding when `load_text_encoder_on_miss=true`.
 
 ```bash
-# single-source SFT (default)
+# default: 8 GPUs (GPU_IDS=0,1,2,3,4,5,6,7)
+bash scripts/train_from_yaml.sh configs/task/robodojo_wan.yaml
+
+# fewer GPUs
+GPU_IDS=0,1,2,3 bash scripts/train_from_yaml.sh configs/task/robodojo_wan.yaml
+
+# single-GPU recipe
 bash scripts/train_single_gpu.sh configs/task/robodojo_a800.yaml
 
-# multi-source pretrain shell
-bash scripts/train_single_gpu.sh configs/task/robodojo_a800.yaml data=mixture
-
-# short smoke run
-bash scripts/train_single_gpu.sh configs/task/robodojo_a800.yaml max_steps=10 log_every=1
+# short smoke on one GPU
+GPU_IDS=0 bash scripts/train_from_yaml.sh configs/task/robodojo_wan.yaml max_steps=10 log_every=1
 ```
 
 Common overrides:
@@ -153,7 +181,7 @@ model.lora.enable=true model.lora.rank=16
 zero=3 zero_offload=true
 ```
 
-Default ZeRO stage is 2 with the optimizer on GPU. Launch scripts materialize Accelerate config under the run directory and point to `configs/deepspeed/`. `ACCELERATE_CONFIG=none` forces single-process PyTorch (`NPROC=1` only).
+Default ZeRO stage is 2 with the optimizer on GPU. `scripts/train_from_yaml.sh` defaults to 8 processes and materializes Accelerate config under the run directory pointing at `configs/deepspeed/`. `ACCELERATE_CONFIG=none` forces single-process PyTorch (`NPROC=1` only).
 
 Run outputs:
 
@@ -188,7 +216,8 @@ The server loads the run `config.yaml`, so architecture, vision tower, and LoRA 
 ```text
 configs/          Hydra data / model / task / deepspeed recipes
 src/xiconwam/     training entry, actors, vision backends, data, engine
-scripts/          launchers and ModelScope IO helpers
+scripts/          launchers, compute_dataset_stats.py, ModelScope IO helpers
+deployment/       ZMQ model_server / robot_client / fake_lerobot_client
 eval/             observation packing helpers for XPolicyLab
 tests/            unit / composition checks
 playground/       local symlinks to datasets and pretrained weights (gitignored)
