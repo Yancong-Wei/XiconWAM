@@ -7,6 +7,9 @@ wandb/
 outputs/
 tmp/
 
+# Local vendor checkouts (OpenWAM / pi05 references, etc.)
+/third_party/
+
 # Python
 __pycache__/
 *.py[cod]
