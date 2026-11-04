@@ -60,6 +60,18 @@ class Policy:
             self.model_cfg.get("checkpoint"),
             base=REPO_ROOT,
         )
+        ckpt_name = self.model_cfg.get("ckpt_name")
+        if checkpoint is None and ckpt_name:
+            name = str(ckpt_name).strip()
+            if name:
+                weights_dir = run_dir / "checkpoints" / "weights"
+                candidate = weights_dir / (name if name.endswith(".pt") else f"{name}.pt")
+                if candidate.is_file():
+                    checkpoint = candidate
+                else:
+                    raise FileNotFoundError(
+                        f"ckpt_name={name!r} not found under {weights_dir}"
+                    )
         if checkpoint is None:
             weights = sorted((run_dir / "checkpoints" / "weights").glob("step_*.pt"))
             if not weights:
