@@ -10,7 +10,8 @@ defaults:
 output_dir: ./runs/${now:%Y-%m-%d_%H-%M-%S}
 
 batch_size: 16
-num_workers: 8
+# Four workers per rank. Eight left too little host RAM for the ZeRO save.
+num_workers: 4
 dataloader_prefetch_factor: 2
 dataloader_persistent_workers: true
 dataloader_pin_memory: true
