@@ -201,15 +201,35 @@ VAE and text encoders stay frozen. Training updates DiT and the state encoder. C
 
 ## 4. Evaluation
 
-Closed-loop RoboDojo evaluation uses the XPolicyLab websocket server:
+Closed-loop scoring lives under [`eval/`](eval/):
+
+- [`eval/XPolicyLab_core`](eval/XPolicyLab_core): websocket policy shell around
+  `deployment/model_server.py` (no `third_party/XPolicyLab` needed)
+- [`eval/RoboDojo`](eval/RoboDojo): vendored RoboDojo sim client + tasks
+  (`ROBODOJO_ROOT` defaults here)
+
+Offline wiring check (no Isaac; dry-zeros skips weight load):
 
 ```bash
-XICON_CHECKPOINT_PATH=/path/to/run/checkpoints/weights/step_003000.pt \
-  bash XPolicyLab/policy/XiconWAM/eval.sh \
-  RoboDojo <task> <ckpt> arx_x5 joint 0 0 0 <policy_env> <eval_env>
+XICON_DRY_ZEROS=1 EVAL_ENV_TYPE=debug bash eval/XPolicyLab_core/eval.sh \
+  RoboDojo stack_bowls step_015000 arx_x5 joint 0 0 0 \
+  .venv/bin/python unused
 ```
 
-The server loads the run `config.yaml`, so architecture, vision tower, and LoRA settings stay aligned with the checkpoint. With `num_frames: 33` and `action_video_freq_ratio: 4`, the model observes 9 frames and predicts 32 action steps; the robot executes `replan_steps` (default 10) before replanning.
+Simulation (one-time Isaac + assets under `eval/RoboDojo`, see
+[`eval/RoboDojo/README.XiconWAM.md`](eval/RoboDojo/README.XiconWAM.md)):
+
+```bash
+cd eval/RoboDojo && bash scripts/install.sh -i && bash scripts/init_assets.sh
+# then from repo root:
+bash eval/XPolicyLab_core/eval.sh \
+  RoboDojo <task> step_015000 arx_x5 joint 0 \
+  <policy_gpu> <env_gpu> .venv/bin/python RoboDojo
+```
+
+The server loads the run `config.yaml`, so architecture stays aligned with the
+checkpoint. Use `action_type=joint`. Real-robot ZMQ serving remains under
+`deployment/` and is separate from this websocket path.
 
 ## 5. Project layout
 
@@ -218,7 +238,7 @@ configs/          Hydra data / model / task / deepspeed recipes
 src/xiconwam/     training entry, actors, vision backends, data, engine
 scripts/          launchers, compute_dataset_stats.py, ModelScope IO helpers
 deployment/       ZMQ model_server / robot_client / fake_lerobot_client
-eval/             observation packing helpers for XPolicyLab
+eval/             XPolicyLab_core + vendored RoboDojo sim client
 tests/            unit / composition checks
 playground/       local symlinks to datasets and pretrained weights (gitignored)
 ```

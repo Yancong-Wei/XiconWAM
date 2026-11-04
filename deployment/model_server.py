@@ -339,6 +339,22 @@ class XiconServeRuntime:
         from xiconwam.actor.helpers.inference import configure_model_execution
 
         cfg = OmegaConf.load(self.config_path)
+        # Training may leave text encoder unloaded (cached embeds). Inference
+        # needs an online encoder for free-form task instructions.
+        if OmegaConf.select(cfg, "model.backbone") is not None:
+            OmegaConf.update(cfg, "model.backbone.load_text_encoder", True, merge=True)
+        for key in (
+            "model.backbone.model_id",
+            "model.backbone.tokenizer_model_id",
+            "model.backbone.action_dit_pretrained_path",
+            "model.action_dit_pretrained_path",
+        ):
+            value = OmegaConf.select(cfg, key)
+            if not value:
+                continue
+            path = Path(str(value)).expanduser()
+            if not path.is_absolute():
+                OmegaConf.update(cfg, key, str((SERVER_ROOT / path).resolve()), merge=True)
         mixed = str(OmegaConf.select(cfg, "mixed_precision") or "bf16").lower()
         dtype = {
             "bf16": torch.bfloat16,
@@ -486,6 +502,11 @@ class XiconServeRuntime:
             dtype=self._model.torch_dtype,
         )
         prompt = extract_instruction(request, self.default_instruction)
+        from xiconwam.data.lerobot.prompts import DEFAULT_PROMPT
+
+        prompt_prefix = DEFAULT_PROMPT.split("{task}", 1)[0]
+        if prompt and not str(prompt).startswith(prompt_prefix):
+            prompt = DEFAULT_PROMPT.format(task=prompt)
 
         with torch.inference_mode():
             result = self._model.infer_action(

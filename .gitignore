@@ -10,6 +10,15 @@ tmp/
 # Local vendor checkouts (OpenWAM / pi05 references, etc.)
 /third_party/
 
+# RoboDojo local installs (code under eval/RoboDojo is tracked; runtime blobs are not)
+/eval/RoboDojo/Assets/
+/eval/RoboDojo/.cache/
+/eval/RoboDojo/eval_result/
+/eval/RoboDojo/smoke_results/
+/eval/RoboDojo/third_party/IsaacLab/
+/eval/RoboDojo/third_party/curobo/
+/eval/RoboDojo/data/
+
 # Python
 __pycache__/
 *.py[cod]
