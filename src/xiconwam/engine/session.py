@@ -40,6 +40,10 @@ logger = get_logger(__name__)
 
 from xiconwam.engine.checkpoint import CheckpointMixin
 from xiconwam.engine.evaluate import EvaluateMixin
+from xiconwam.engine.runtime_tuning import (
+    apply_deepspeed_runtime_settings,
+    maybe_freeze_gc,
+)
 
 
 def _cfg_none(value) -> bool:
@@ -163,6 +167,8 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
             self.gradient_accumulation_steps,
             self.max_grad_norm,
         )
+        if self.is_deepspeed and deepspeed_plugin is not None:
+            apply_deepspeed_runtime_settings(deepspeed_config)
         logger.info("using accelerator.device=%s", self.accelerator.device)
         logger.info(
             "DataLoader settings: batch_size=%d num_workers=%d pin_memory=%s persistent_workers=%s prefetch_factor=%d worker_threads=%d",
@@ -822,6 +828,7 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
 
             if self.accelerator.sync_gradients:
                 self.global_step += 1
+                maybe_freeze_gc(self.global_step)
                 checkpoint_saved_at_current_step = False
                 current_lr = float(self.optimizer.param_groups[0]["lr"])
                 current_epoch, planned_epochs = self._epoch_progress()

@@ -1,5 +1,9 @@
 """Training entry. `python -m xiconwam.train` reads configs/ next to this project."""
 
+from xiconwam.engine.runtime_tuning import enable_expandable_segments
+
+enable_expandable_segments()
+
 import hydra
 from omegaconf import DictConfig
 
