@@ -29,14 +29,16 @@ python deployment/model_server.py \
 
 ## Offline fake client
 
+Artifacts default to ``<run-dir>/openloop/ep*_f*/`` (override with ``--output-dir``).
+
 ```bash
 python deployment/fake_lerobot_client.py \
   --url tcp://127.0.0.1:5556 \
+  --run-dir runs/robodojo_wan/<run_id> \
   --lerobot-dataset-path playground/datasets/robodojo \
   --episode-id 0 --frame-id 0 --chunk-num 3 \
   --execute-steps 32 \
-  --instruction "pick up the cube and place it on the platform" \
-  --output-dir output/openloop_eval/xiconwam
+  --instruction "pick up the cube and place it on the platform"
 ```
 
 ## Robot client

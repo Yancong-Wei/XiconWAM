@@ -14,14 +14,14 @@ Example:
 
     python deployment/fake_lerobot_client.py \\
       --url tcp://127.0.0.1:5556 \\
+      --run-dir runs/robodojo_wan/<run_id> \\
       --lerobot-dataset-path playground/datasets/robodojo \\
       --episode-id 0 --frame-id 0 --chunk-num 3 --execute-steps 32 \\
       --instruction "pick up the cube and place it on the platform" \\
       --image-map \\
         cam_high=observation.images.cam_high \\
         cam_left_wrist=observation.images.cam_left_wrist \\
-        cam_right_wrist=observation.images.cam_right_wrist \\
-      --output-dir output/openloop_eval/xiconwam
+        cam_right_wrist=observation.images.cam_right_wrist
 """
 from __future__ import annotations
 
@@ -148,12 +148,16 @@ class LocalLeRobot3:
         self.info = read_json(self.root / "meta" / "info.json")
         self.fps = int(self.info.get("fps", 30))
         self.video_keys = tuple(
-            key for key, feature in self.info.get("features", {}).items() if feature.get("dtype") == "video"
+            key
+            for key, feature in self.info.get("features", {}).items()
+            if feature.get("dtype") == "video"
         )
         self.tasks = self._load_tasks()
         self.episodes = self._load_episodes()
         self.data = self._load_data()
-        self._abs_to_pos = {int(as_scalar(row["index"])): pos for pos, row in enumerate(self.data)}
+        self._abs_to_pos = {
+            int(as_scalar(row["index"])): pos for pos, row in enumerate(self.data)
+        }
         self._video_readers: dict[Path, Any] = {}
 
     def _load_tasks(self) -> dict[int, str]:
@@ -163,7 +167,9 @@ class LocalLeRobot3:
         tasks: dict[int, str] = {}
         for row in read_parquet_rows(tasks_path):
             task_index = int(as_scalar(row.get("task_index", row.get("index", 0))))
-            task = row.get("task", row.get("name", row.get("__index_level_0__", task_index)))
+            task = row.get(
+                "task", row.get("name", row.get("__index_level_0__", task_index))
+            )
             tasks[task_index] = str(as_scalar(task))
         return tasks
 
@@ -180,25 +186,37 @@ class LocalLeRobot3:
         rows.sort(key=lambda row: int(as_scalar(row["index"])))
         return rows
 
-    def choose_sample(self, episode_id: int | None, frame_id: int | None, rng: random.Random) -> dict[str, Any]:
+    def choose_sample(
+        self, episode_id: int | None, frame_id: int | None, rng: random.Random
+    ) -> dict[str, Any]:
         random_episode = episode_id is None
         if episode_id is None:
             episode_id = rng.choice(sorted(self.episodes))
-        episode_rows = [row for row in self.data if int(as_scalar(row["episode_index"])) == int(episode_id)]
+        episode_rows = [
+            row
+            for row in self.data
+            if int(as_scalar(row["episode_index"])) == int(episode_id)
+        ]
         if not episode_rows:
             raise ValueError(f"No rows found for episode {episode_id}")
         if frame_id is not None:
             for row in episode_rows:
-                if int(as_scalar(row.get("frame_index", row["index"]))) == int(frame_id):
+                if int(as_scalar(row.get("frame_index", row["index"]))) == int(
+                    frame_id
+                ):
                     return row
             raise ValueError(f"No frame_id={frame_id} in episode {episode_id}")
         return rng.choice(episode_rows) if random_episode else episode_rows[0]
 
     def episode_bounds_for_row(self, row: dict[str, Any]) -> tuple[int, int]:
         episode = self.episodes[int(as_scalar(row["episode_index"]))]
-        return int(as_scalar(episode["dataset_from_index"])), int(as_scalar(episode["dataset_to_index"]))
+        return int(as_scalar(episode["dataset_from_index"])), int(
+            as_scalar(episode["dataset_to_index"])
+        )
 
-    def next_row_in_episode(self, row: dict[str, Any], stride: int) -> dict[str, Any] | None:
+    def next_row_in_episode(
+        self, row: dict[str, Any], stride: int
+    ) -> dict[str, Any] | None:
         _, ep_end = self.episode_bounds_for_row(row)
         next_abs_index = int(as_scalar(row["index"])) + max(1, int(stride))
         if next_abs_index >= ep_end:
@@ -207,7 +225,9 @@ class LocalLeRobot3:
         if pos is None:
             return None
         next_row = self.data[pos]
-        if int(as_scalar(next_row["episode_index"])) != int(as_scalar(row["episode_index"])):
+        if int(as_scalar(next_row["episode_index"])) != int(
+            as_scalar(row["episode_index"])
+        ):
             return None
         return next_row
 
@@ -226,8 +246,12 @@ class LocalLeRobot3:
         abs_idx = int(as_scalar(row["index"]))
         ep_start = int(as_scalar(episode["dataset_from_index"]))
         ep_end = int(as_scalar(episode["dataset_to_index"]))
-        indices = [max(ep_start, min(ep_end - 1, abs_idx + t)) for t in range(int(horizon))]
-        return np.stack([self.value_at_abs_index(key, idx) for idx in indices], axis=0).astype(np.float32)
+        indices = [
+            max(ep_start, min(ep_end - 1, abs_idx + t)) for t in range(int(horizon))
+        ]
+        return np.stack(
+            [self.value_at_abs_index(key, idx) for idx in indices], axis=0
+        ).astype(np.float32)
 
     def image_for_key(self, row: dict[str, Any], dataset_key: str) -> np.ndarray:
         if dataset_key in self.video_keys:
@@ -238,7 +262,9 @@ class LocalLeRobot3:
         try:
             import imageio.v2 as imageio
         except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError("Video decoding requires imageio[ffmpeg].") from exc
+            raise ModuleNotFoundError(
+                "Video decoding requires imageio[ffmpeg]."
+            ) from exc
 
         episode = self.episodes[int(as_scalar(row["episode_index"]))]
         video_path_template = self.info.get("video_path")
@@ -252,7 +278,9 @@ class LocalLeRobot3:
         if not video_path.exists():
             raise FileNotFoundError(video_path)
 
-        timestamp = float(as_scalar(episode[f"videos/{video_key}/from_timestamp"])) + float(as_scalar(row["timestamp"]))
+        timestamp = float(
+            as_scalar(episode[f"videos/{video_key}/from_timestamp"])
+        ) + float(as_scalar(row["timestamp"]))
         frame_index = max(0, int(round(timestamp * self.fps)))
 
         reader = self._video_readers.get(video_path)
@@ -344,7 +372,7 @@ def build_request(
 def request_images(request: dict[str, Any]) -> dict[str, np.ndarray]:
     prefix = "observation.images."
     return {
-        key[len(prefix):]: np.asarray(value)
+        key[len(prefix) :]: np.asarray(value)
         for key, value in request.items()
         if key.startswith(prefix)
     }
@@ -358,7 +386,9 @@ def response_action(response: dict[str, Any]) -> np.ndarray:
     chunk = response.get("action_chunk")
     if isinstance(chunk, dict) and "values" in chunk:
         return np.asarray(chunk["values"], dtype=np.float32)
-    raise KeyError(f"Response does not contain action/action_chunk.values: {list(response)}")
+    raise KeyError(
+        f"Response does not contain action/action_chunk.values: {list(response)}"
+    )
 
 
 def plot_cameras(images: dict[str, np.ndarray], output_path: Path) -> None:
@@ -387,7 +417,9 @@ def plot_cameras(images: dict[str, np.ndarray], output_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_actions(pred: np.ndarray, gt: np.ndarray | None, output_path: Path, *, error: bool = False) -> None:
+def plot_actions(
+    pred: np.ndarray, gt: np.ndarray | None, output_path: Path, *, error: bool = False
+) -> None:
     try:
         import matplotlib
     except ModuleNotFoundError:
@@ -406,7 +438,11 @@ def plot_actions(pred: np.ndarray, gt: np.ndarray | None, output_path: Path, *, 
     fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 2.4 * rows), squeeze=False)
     axes_arr = axes.reshape(-1)
     x = np.arange(pred.shape[0])
-    gt_arr = None if gt is None or np.asarray(gt).size == 0 else np.asarray(gt, dtype=np.float32)
+    gt_arr = (
+        None
+        if gt is None or np.asarray(gt).size == 0
+        else np.asarray(gt, dtype=np.float32)
+    )
     if gt_arr is not None and gt_arr.ndim == 1:
         gt_arr = gt_arr[None, :]
 
@@ -429,7 +465,9 @@ def plot_actions(pred: np.ndarray, gt: np.ndarray | None, output_path: Path, *, 
     plt.close(fig)
 
 
-def plot_timeline(summaries: list[dict[str, Any]], output_path: Path, *, rtc: bool) -> None:
+def plot_timeline(
+    summaries: list[dict[str, Any]], output_path: Path, *, rtc: bool
+) -> None:
     """Show exactly how an offline replay advanced its virtual control clock."""
     try:
         import matplotlib
@@ -448,13 +486,23 @@ def plot_timeline(summaries: list[dict[str, Any]], output_path: Path, *, rtc: bo
     rtt_ax.bar(indices, rtt_ms, color="#4C78A8")
     rtt_ax.set_ylabel("RTT (ms)")
     rtt_ax.grid(True, axis="y", alpha=0.25)
-    steps_ax.bar(indices, virtual_steps, label="old steps during inference", color="#59A14F")
-    steps_ax.bar(indices, discarded, bottom=virtual_steps, label="discarded old tail", color="#E15759")
+    steps_ax.bar(
+        indices, virtual_steps, label="old steps during inference", color="#59A14F"
+    )
+    steps_ax.bar(
+        indices,
+        discarded,
+        bottom=virtual_steps,
+        label="discarded old tail",
+        color="#E15759",
+    )
     steps_ax.set_ylabel("old chunk steps")
     steps_ax.set_xlabel("model chunk request")
     steps_ax.grid(True, axis="y", alpha=0.25)
     steps_ax.legend(fontsize=8)
-    fig.suptitle("RTC-guided teacher-forced replay" if rtc else "no-RTC teacher-forced replay")
+    fig.suptitle(
+        "RTC-guided teacher-forced replay" if rtc else "no-RTC teacher-forced replay"
+    )
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -481,7 +529,16 @@ def _plot_cameras_cv2(images: dict[str, np.ndarray], output_path: Path) -> None:
         y, x = divmod(index, cols)
         top, left = y * tile_h, x * tile_w
         canvas[top + 24 : top + tile_h, left : left + tile_w] = resized
-        cv2.putText(canvas, name, (left + 6, top + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 20, 20), 1, cv2.LINE_AA)
+        cv2.putText(
+            canvas,
+            name,
+            (left + 6, top + 17),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (20, 20, 20),
+            1,
+            cv2.LINE_AA,
+        )
     _write_rgb_png(canvas, output_path)
 
 
@@ -511,16 +568,24 @@ def _plot_line_cv2(
     if len(points) == 1:
         cv2.circle(canvas, points[0], 2, color, -1)
     else:
-        cv2.polylines(canvas, [np.asarray(points, dtype=np.int32)], False, color, 1, cv2.LINE_AA)
+        cv2.polylines(
+            canvas, [np.asarray(points, dtype=np.int32)], False, color, 1, cv2.LINE_AA
+        )
 
 
-def _plot_actions_cv2(pred: np.ndarray, gt: np.ndarray | None, output_path: Path, *, error: bool) -> None:
+def _plot_actions_cv2(
+    pred: np.ndarray, gt: np.ndarray | None, output_path: Path, *, error: bool
+) -> None:
     import cv2
 
     pred = np.asarray(pred, dtype=np.float32)
     if pred.ndim == 1:
         pred = pred[None, :]
-    gt_arr = None if gt is None or np.asarray(gt).size == 0 else np.asarray(gt, dtype=np.float32)
+    gt_arr = (
+        None
+        if gt is None or np.asarray(gt).size == 0
+        else np.asarray(gt, dtype=np.float32)
+    )
     if gt_arr is not None and gt_arr.ndim == 1:
         gt_arr = gt_arr[None, :]
     dim = int(pred.shape[1])
@@ -542,16 +607,49 @@ def _plot_actions_cv2(pred: np.ndarray, gt: np.ndarray | None, output_path: Path
         high = max(float(np.max(values)) for values in series)
         if np.isclose(low, high):
             low, high = low - 1.0, high + 1.0
-        cv2.rectangle(canvas, (left, top), (left + width, top + height), (190, 190, 190), 1)
-        _plot_line_cv2(canvas, series[0], left=left, top=top, width=width, height=height, color=(45, 94, 175), minimum=low, maximum=high)
+        cv2.rectangle(
+            canvas, (left, top), (left + width, top + height), (190, 190, 190), 1
+        )
+        _plot_line_cv2(
+            canvas,
+            series[0],
+            left=left,
+            top=top,
+            width=width,
+            height=height,
+            color=(45, 94, 175),
+            minimum=low,
+            maximum=high,
+        )
         if len(series) == 2:
-            _plot_line_cv2(canvas, series[1], left=left, top=top, width=width, height=height, color=(225, 87, 89), minimum=low, maximum=high)
+            _plot_line_cv2(
+                canvas,
+                series[1],
+                left=left,
+                top=top,
+                width=width,
+                height=height,
+                color=(225, 87, 89),
+                minimum=low,
+                maximum=high,
+            )
         label = f"dim {dim_index}" + (" err" if error else "")
-        cv2.putText(canvas, label, (left, top - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (30, 30, 30), 1, cv2.LINE_AA)
+        cv2.putText(
+            canvas,
+            label,
+            (left, top - 9),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            (30, 30, 30),
+            1,
+            cv2.LINE_AA,
+        )
     _write_rgb_png(canvas, output_path)
 
 
-def _plot_timeline_cv2(summaries: list[dict[str, Any]], output_path: Path, *, rtc: bool) -> None:
+def _plot_timeline_cv2(
+    summaries: list[dict[str, Any]], output_path: Path, *, rtc: bool
+) -> None:
     import cv2
 
     width, height = 1000, 540
@@ -563,9 +661,31 @@ def _plot_timeline_cv2(summaries: list[dict[str, Any]], output_path: Path, *, rt
     old = [int(item["virtual_old_steps"]) for item in summaries]
     discarded = [int(item["discarded_steps"]) for item in summaries]
 
-    def bars(values: list[float], top: int, graph_height: int, color: tuple[int, int, int], *, stacked: list[float] | None = None) -> None:
-        maximum = max(1.0, max((value + (stacked[index] if stacked else 0.0) for index, value in enumerate(values)), default=0.0))
-        cv2.rectangle(canvas, (margin, top), (width - margin, top + graph_height), (190, 190, 190), 1)
+    def bars(
+        values: list[float],
+        top: int,
+        graph_height: int,
+        color: tuple[int, int, int],
+        *,
+        stacked: list[float] | None = None,
+    ) -> None:
+        maximum = max(
+            1.0,
+            max(
+                (
+                    value + (stacked[index] if stacked else 0.0)
+                    for index, value in enumerate(values)
+                ),
+                default=0.0,
+            ),
+        )
+        cv2.rectangle(
+            canvas,
+            (margin, top),
+            (width - margin, top + graph_height),
+            (190, 190, 190),
+            1,
+        )
         for index, value in enumerate(values):
             x = margin + int(index * (width - 2 * margin) / count) + 4
             base = 0.0 if stacked is None else stacked[index]
@@ -573,10 +693,37 @@ def _plot_timeline_cv2(summaries: list[dict[str, Any]], output_path: Path, *, rt
             y1 = top + graph_height - int((base + value) * graph_height / maximum)
             cv2.rectangle(canvas, (x, y1), (x + bar_width, y0), color, -1)
 
-    cv2.putText(canvas, "RTC-guided teacher-forced replay" if rtc else "no-RTC teacher-forced replay", (margin, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)
-    cv2.putText(canvas, "RTT (ms)", (margin, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (20, 20, 20), 1, cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        "RTC-guided teacher-forced replay" if rtc else "no-RTC teacher-forced replay",
+        (margin, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (20, 20, 20),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        canvas,
+        "RTT (ms)",
+        (margin, 58),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (20, 20, 20),
+        1,
+        cv2.LINE_AA,
+    )
     bars(rtt, 70, 170, (76, 120, 168))
-    cv2.putText(canvas, "old chunk steps (green=executed, red=discarded)", (margin, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (20, 20, 20), 1, cv2.LINE_AA)
+    cv2.putText(
+        canvas,
+        "old chunk steps (green=executed, red=discarded)",
+        (margin, 280),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        (20, 20, 20),
+        1,
+        cv2.LINE_AA,
+    )
     bars(old, 292, 170, (89, 161, 79))
     bars(discarded, 292, 170, (225, 87, 89), stacked=[float(value) for value in old])
     _write_rgb_png(canvas, output_path)
@@ -596,10 +743,36 @@ def json_safe(value: Any) -> Any:
     return str(value)
 
 
+def resolve_output_dir(
+    *,
+    run_dir: str | None,
+    output_dir: str | None,
+    episode_id: int | None,
+    frame_id: int | None,
+) -> Path:
+    """Default open-loop artifacts under ``<run-dir>/openloop/``."""
+    if output_dir:
+        return Path(output_dir).expanduser().resolve()
+    if not run_dir:
+        raise SystemExit(
+            "Provide --run-dir (writes to <run-dir>/openloop/) or an explicit --output-dir"
+        )
+    ep = f"ep{episode_id}" if episode_id is not None else "ep_random"
+    fr = f"f{frame_id}" if frame_id is not None else "f_random"
+    return (Path(run_dir).expanduser().resolve() / "openloop" / f"{ep}_{fr}").resolve()
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Fake robot client for local LeRobot v3 policy validation")
+    parser = argparse.ArgumentParser(
+        description="Fake robot client for local LeRobot v3 policy validation"
+    )
     parser.add_argument("--url", default="tcp://localhost:5556")
     parser.add_argument("--timeout-ms", type=int, default=60000)
+    parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="Training run directory; default --output-dir is <run-dir>/openloop/ep*_f*",
+    )
     parser.add_argument("--lerobot-dataset-path", required=True)
     parser.add_argument("--episode-id", type=int, default=None)
     parser.add_argument("--frame-id", type=int, default=None)
@@ -616,7 +789,11 @@ def parse_args() -> argparse.Namespace:
         help="Background inference trigger K; default is the returned horizon (serial open-loop).",
     )
     parser.add_argument("--instruction", default=None)
-    parser.add_argument("--output-dir", default="output/fake_lerobot_client")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Override artifact dir; default is <run-dir>/openloop/ep*_f*",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--chunk-size",
@@ -642,7 +819,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     rng = random.Random(args.seed)
-    output_dir = Path(args.output_dir)
+    output_dir = resolve_output_dir(
+        run_dir=args.run_dir,
+        output_dir=args.output_dir,
+        episode_id=args.episode_id,
+        frame_id=args.frame_id,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = LocalLeRobot3(args.lerobot_dataset_path)
@@ -698,12 +880,18 @@ def main() -> None:
                 )
             pred = response_action(response)
             horizon = int(args.chunk_size or pred.shape[0])
-            action_fps = float(((response.get("metadata") or {}).get("action_fps")) or dataset.fps)
+            action_fps = float(
+                ((response.get("metadata") or {}).get("action_fps")) or dataset.fps
+            )
             if pred.shape[0] != horizon:
-                raise ValueError(f"Expected horizon {horizon}, server returned {pred.shape[0]}")
+                raise ValueError(
+                    f"Expected horizon {horizon}, server returned {pred.shape[0]}"
+                )
             trigger_step = int(args.execute_steps or horizon)
             if not 1 <= trigger_step <= horizon:
-                raise ValueError(f"--execute-steps must be in [1,{horizon}], got {trigger_step}")
+                raise ValueError(
+                    f"--execute-steps must be in [1,{horizon}], got {trigger_step}"
+                )
             rtc_trigger_step = trigger_step
             virtual_old_steps = 0
             discarded_steps = 0
@@ -758,7 +946,11 @@ def main() -> None:
                     "pred_shape": list(pred.shape),
                     "gt_shape": list(gt.shape),
                     "rtt_ms": rtt_ms,
-                    "mode": "server_rtc" if (response.get("metadata") or {}).get("pi05_rtc") else "generic",
+                    "mode": (
+                        "server_rtc"
+                        if (response.get("metadata") or {}).get("pi05_rtc")
+                        else "generic"
+                    ),
                     "trigger_step": trigger_step,
                     "virtual_old_steps": virtual_old_steps,
                     "discarded_steps": discarded_steps,
@@ -775,7 +967,11 @@ def main() -> None:
                 pred.shape,
                 gt.shape,
                 rtt_ms,
-                "server_rtc" if (response.get("metadata") or {}).get("pi05_rtc") else "generic",
+                (
+                    "server_rtc"
+                    if (response.get("metadata") or {}).get("pi05_rtc")
+                    else "generic"
+                ),
                 virtual_old_steps,
                 discarded_steps,
                 (response.get("metadata") or {}).get("pi05_rtc"),
@@ -797,15 +993,23 @@ def main() -> None:
             current_row = next_row
 
         pred_all = np.concatenate(all_pred, axis=0)
-        gt_all = np.concatenate(all_gt, axis=0) if all_gt else np.empty((0, 0), dtype=np.float32)
+        gt_all = (
+            np.concatenate(all_gt, axis=0)
+            if all_gt
+            else np.empty((0, 0), dtype=np.float32)
+        )
         first_request = all_requests[0]
         plot_cameras(request_images(first_request), output_dir / "cameras.png")
         plot_actions(pred_all, gt_all, output_dir / "actions_pred_vs_gt.png")
         plot_actions(pred_all, gt_all, output_dir / "actions_error.png", error=True)
-        server_rtc = any(bool((response.get("metadata") or {}).get("pi05_rtc")) for response in all_responses)
+        server_rtc = any(
+            bool((response.get("metadata") or {}).get("pi05_rtc"))
+            for response in all_responses
+        )
         plot_timeline(
             summaries,
-            output_dir / ("rtc_timeline.png" if server_rtc else "open_loop_timeline.png"),
+            output_dir
+            / ("rtc_timeline.png" if server_rtc else "open_loop_timeline.png"),
             rtc=server_rtc,
         )
 
@@ -826,7 +1030,9 @@ def main() -> None:
             "chunk_num_requested": int(args.chunk_num),
             "full_episode": full_episode,
             "server_rtc": server_rtc,
-            "execute_steps": None if args.execute_steps is None else int(args.execute_steps),
+            "execute_steps": (
+                None if args.execute_steps is None else int(args.execute_steps)
+            ),
             "instruction": instruction,
             "image_keys": list(request_images(first_request).keys()),
             "state_shape": list(np.asarray(first_request["observation.state"]).shape),
@@ -834,13 +1040,19 @@ def main() -> None:
             "gt_shape": list(gt_all.shape),
             "chunks": summaries,
         }
-        (output_dir / "summary.json").write_text(json.dumps(json_safe(summary), indent=2))
+        (output_dir / "summary.json").write_text(
+            json.dumps(json_safe(summary), indent=2)
+        )
         (output_dir / "timeline.jsonl").write_text(
-            "".join(json.dumps(json_safe(item), sort_keys=True) + "\n" for item in summaries),
+            "".join(
+                json.dumps(json_safe(item), sort_keys=True) + "\n" for item in summaries
+            ),
             encoding="utf-8",
         )
         (output_dir / "event_trace.jsonl").write_text(
-            "".join(json.dumps(json_safe(item), sort_keys=True) + "\n" for item in events),
+            "".join(
+                json.dumps(json_safe(item), sort_keys=True) + "\n" for item in events
+            ),
             encoding="utf-8",
         )
         logger.info("Saved fake-client outputs to %s", output_dir)
@@ -850,5 +1062,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    )
     main()
