@@ -7,7 +7,9 @@ from xiconwam.data.discovery import discover_dataset_dirs
 
 def leaf(path, version="v3.0"):
     (path / "meta").mkdir(parents=True)
-    (path / "meta/info.json").write_text(json.dumps({"codebase_version": version}))
+    (path / "meta/info.json").write_text(
+        json.dumps({"codebase_version": version, "features": {}})
+    )
     return str(path.resolve())
 
 
