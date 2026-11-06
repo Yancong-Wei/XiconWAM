@@ -1,0 +1,14 @@
+XPolicyLab websocket protocol (Apache License 2.0)
+==================================================
+
+The files under client_server/ws/ and the JPEG observation decode helpers in
+images.py are derived from:
+
+  https://github.com/XPolicyLab/XPolicyLab
+
+Copyright holders and license terms for that upstream project apply. See the
+Apache License 2.0 text distributed with XPolicyLab.
+
+This XiconWAM package vendors only the websocket transport and image-decode
+path needed for RoboDojo closed-loop evaluation. Other XPolicyLab policies,
+training utilities, and TCP transport are not included.

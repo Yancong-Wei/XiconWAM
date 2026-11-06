@@ -39,6 +39,24 @@ from xiconwam.kit.video_metrics import (
 logger = get_logger(__name__)
 
 
+def _drop_file_cache(path: str) -> None:
+    """Release a checkpoint file's page cache back to the memory cgroup."""
+    if not path or not os.path.isfile(path):
+        return
+    if not hasattr(os, "posix_fadvise"):
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _cfg_none(value) -> bool:
     if value is None:
         return True
@@ -187,7 +205,12 @@ class CheckpointMixin:
         state_started_at = time.perf_counter()
         if self.accelerator.is_main_process:
             logger.info("[ckpt] saving distributed state: %s", state_path)
-        self.accelerator.save_state(output_dir=state_path)
+        restore_zero_save = self._stagger_zero_checkpoint_writes()
+        try:
+            self.accelerator.save_state(output_dir=state_path)
+        finally:
+            if restore_zero_save is not None:
+                restore_zero_save()
         if self.accelerator.is_main_process:
             self._save_trainer_state(state_path)
             logger.info(
@@ -202,6 +225,34 @@ class CheckpointMixin:
         self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
+
+    def _stagger_zero_checkpoint_writes(self):
+        """Write one ZeRO optimizer shard at a time, then drop its cache."""
+        import torch.distributed as dist
+
+        engine = self.model
+        original = getattr(engine, "_save_zero_checkpoint", None)
+        if (
+            not callable(original)
+            or not dist.is_available()
+            or not dist.is_initialized()
+        ):
+            return None
+
+        def staggered(save_path, tag):
+            rank = dist.get_rank()
+            for active in range(dist.get_world_size()):
+                if rank == active:
+                    original(save_path, tag)
+                    _drop_file_cache(engine._get_zero_ckpt_name(save_path, tag))
+                dist.barrier()
+
+        engine._save_zero_checkpoint = staggered
+
+        def restore():
+            engine._save_zero_checkpoint = original
+
+        return restore
 
     def load_training_state(self, state_dir: str):
         self.accelerator.load_state(input_dir=state_dir)

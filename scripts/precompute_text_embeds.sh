@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
-# Read the task and vision tower. Text encoding stays in the package.
-# The cache directory comes from the task config.
+# The task YAML selects the vision tower and text-embedding cache directory.
 #
-#   bash scripts/precompute_text_embeds.sh configs/task/robodojo.yaml wan22
-#   bash scripts/precompute_text_embeds.sh configs/task/robodojo.yaml cosmos25 --overwrite
+#   bash scripts/precompute_text_embeds.sh configs/task/robodojo_wan.yaml
+#   bash scripts/precompute_text_embeds.sh configs/task/robodojo_cosmos.yaml --overwrite
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
 CONFIG_YAML="${1:-}"
-BACKBONE="${2:-}"
-if [[ -z "${CONFIG_YAML}" || -z "${BACKBONE}" ]]; then
-  echo "Usage: bash scripts/precompute_text_embeds.sh configs/task/<task>.yaml <backbone> [extra args...]" >&2
+if [[ -z "${CONFIG_YAML}" ]]; then
+  echo "Usage: bash scripts/precompute_text_embeds.sh configs/task/<task>.yaml [--overwrite]" >&2
   exit 2
 fi
-shift 2
+shift
 
 if [[ "${CONFIG_YAML}" != /* ]]; then
   CONFIG_YAML="${ROOT}/${CONFIG_YAML}"
@@ -32,7 +30,4 @@ if [[ "$(cd "$(dirname "${CONFIG_YAML}")" && pwd)" != "${TASK_DIR}" ]]; then
 fi
 
 export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
-exec python -m xiconwam.precompute_text \
-  --config-name "task/${TASK}" \
-  "model/backbone=${BACKBONE}" \
-  "$@"
+exec python -m xiconwam.precompute_text --config-name "task/${TASK}" "$@"

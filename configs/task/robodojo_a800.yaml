@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - robodojo
+  - robodojo_wan
   - _self_
 
 output_dir: ./runs/${now:%Y-%m-%d_%H-%M-%S}

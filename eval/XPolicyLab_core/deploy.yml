@@ -1,0 +1,33 @@
+# Minimal RoboDojo closed-loop deploy config for XiconWAM.
+# Paths are relative to the XiconWAM repo root unless absolute.
+# Override with XICON_RUN_DIR / XICON_CHECKPOINT / XICON_DATASET_STATS or
+# server.py --overrides key=value.
+
+policy_name: XiconWAM
+protocol: ws
+eval_batch: false
+host: 0.0.0.0
+port: null
+
+bench_name: null
+task_name: null
+ckpt_name: null
+env_cfg_type: arx_x5
+action_type: joint
+action_dim: 14
+model_action_dim: 48
+seed: null
+gpu_id: null
+
+action_horizon: 32
+replan_steps: 10
+num_inference_steps: 10
+num_video_frames: 9
+device: cuda
+default_instruction: null
+dry_zeros: false
+
+# Set XICON_RUN_DIR for real evaluation. ckpt_name from eval.sh selects its weight.
+run_dir: null
+checkpoint: null
+dataset_stats: null

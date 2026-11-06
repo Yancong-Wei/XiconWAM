@@ -23,6 +23,8 @@ python -m pip install -e '.[engine-validation]' --extra-index-url https://downlo
 
 目前 optional extra 精确锁定 `0.1.0.dev0`，不假定 PyPI 已存在该包。两端使用同一已验收 wheel；发布版本后再一起更新锁定。机器人环境只需安装不带 validation 的 Engine wheel。
 
+使用 uv 时，`uv sync --locked` 安装锁定的训练/评测依赖，然后用 `uv pip install '/path/to/xicon_engine-0.1.0.dev0-py3-none-any.whl[validation]'` 单独安装 Engine。项目通过 uv 的 `exclude-dependencies` 将这个外部 wheel 排除在公共索引求解之外；`uv sync --extra engine` 也不会自动安装它。后续同步若需保留该 wheel，使用 `uv sync --locked --inexact`。
+
 只想看无权重演示时，不必安装整个 CUDA 训练栈。在装有 Engine validation extra 的轻量环境，从本仓库根目录执行：
 
 ```bash

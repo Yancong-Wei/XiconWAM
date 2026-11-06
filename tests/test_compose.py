@@ -78,15 +78,11 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(cfg.model.loss.lambda_video, 1.0)
 
     def test_models_are_separate_configs(self):
-        idm = self._compose("task/robodojo", "model=idm")
+        idm = self._compose("task/robodojo_wan", "model=idm")
         self.assertEqual(idm.model.architecture, "idm")
         self.assertEqual(idm.model.video_cond_noise_prob, 0.5)
         self.assertEqual(idm.max_steps, 30000)
-        hide = self._compose(
-            "task/robodojo",
-            "model=hide",
-            "model/backbone=cosmos25",
-        )
+        hide = self._compose("task/robodojo_cosmos", "model=hide")
         resolved = OmegaConf.to_container(hide.model, resolve=True)
         self.assertEqual(resolved["architecture"], "hide")
         self.assertEqual(resolved["extract_layer"], 16)
@@ -104,7 +100,7 @@ class ComposeTest(unittest.TestCase):
         self.assertNotIn("detach_video_hidden", resolved)
 
     def test_flux_action_expert_matches_the_staged_tower(self):
-        cfg = self._compose("task/robodojo", "model/backbone=flux2")
+        cfg = self._compose("task/robodojo_flux")
         expert = OmegaConf.to_container(cfg.model.action_dit_config, resolve=True)
         self.assertEqual(expert["preset"], "staged")
         self.assertFalse(expert["cross_attention"])
@@ -113,7 +109,7 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(cfg.model.loss.lambda_video, 0.5)
 
     def test_val_reuses_train_and_cameras_are_not_repeated(self):
-        cfg = self._compose("task/robodojo")
+        cfg = self._compose("task/robodojo_wan")
         processor = instantiate(cfg.data.train.processor)
         self.assertEqual(processor.num_output_cameras, 3)
         self.assertEqual(
@@ -129,7 +125,7 @@ class ComposeTest(unittest.TestCase):
         self.assertIn("wan22", resolved["text_embedding_cache_dir"])
 
     def test_hide_uses_the_same_action_expert(self):
-        mot = self._compose("task/robodojo")
+        mot = self._compose("task/robodojo_wan")
         backbone, action = action_expert_spec(mot)
         self.assertEqual(backbone["name"], "wan22")
         self.assertEqual(action["hidden_dim"], 1024)
@@ -138,7 +134,7 @@ class ComposeTest(unittest.TestCase):
         self.assertTrue(dirs)
         self.assertEqual(context_len, 128)
         self.assertIn("wan22", str(cache_dir))
-        hide = self._compose("task/robodojo", "model=hide")
+        hide = self._compose("task/robodojo_wan", "model=hide")
         hide_backbone, hide_action = action_expert_spec(hide)
         self.assertEqual(hide_backbone["name"], backbone["name"])
         self.assertEqual(hide_action["hidden_dim"], action["hidden_dim"])
@@ -148,7 +144,7 @@ class ComposeTest(unittest.TestCase):
         )
 
     def test_mixture_data_composes(self):
-        cfg = self._compose("task/robodojo", "data=mixture")
+        cfg = self._compose("task/robodojo_wan", "data=mixture")
         OmegaConf.resolve(cfg)
         self.assertFalse(cfg.data.train._recursive_)
         self.assertEqual(
