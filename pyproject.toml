@@ -47,7 +47,14 @@ dependencies = [
   "websockets>=14.0",
 ]
 
+[project.optional-dependencies]
+engine = ["xicon-engine==0.1.0.dev0"]
+engine-validation = ["xicon-engine[validation]==0.1.0.dev0"]
+
 [project.scripts]
+xiconwam-bundle = "xiconwam.deployment.bundle:main"
+xiconwam-engine-smoke = "xiconwam.deployment.smoke:main"
+xiconwam-serve = "xiconwam.deployment.serve:main"
 xiconwam-train = "xiconwam.train:main"
 xiconwam-prepare-action-expert = "xiconwam.prepare_action_expert:main"
 xiconwam-precompute-text = "xiconwam.precompute_text:main"
@@ -65,3 +72,8 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
+
+[tool.uv]
+# Engine is distributed as a separately reviewed wheel, not from this registry.
+# Install that wheel after uv sync; pip extras above retain the version contract.
+exclude-dependencies = ["xicon-engine"]

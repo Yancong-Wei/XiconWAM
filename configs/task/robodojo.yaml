@@ -1,0 +1,5 @@
+# @package _global_
+# Compatibility alias for runs/scripts using the original Wan task name.
+defaults:
+  - robodojo_wan
+  - _self_

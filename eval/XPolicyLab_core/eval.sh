@@ -75,7 +75,7 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
     print(sock.getsockname()[1])
 PY
 )"
-policy_server_ip="localhost"
+policy_server_ip="127.0.0.1"
 
 SERVER_PID=""
 cleanup() {

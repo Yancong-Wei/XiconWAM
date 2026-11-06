@@ -1,6 +1,6 @@
 # XiconWAM
 
-XiconWAM trains dual-stream world-action policies on frozen video backbones for robot manipulation.
+XiconWAM trains dual-stream world-action policies with pretrained video backbones for robot manipulation. The default trainer updates the joint DiT and state encoder while keeping the VAE and text encoder frozen.
 
 Supported vision towers: **Wan2.2-TI2V-5B**, **Cosmos-Predict2.5-2B**, **FLUX.2-klein-4B**.  
 Supported policy heads: **`mot`** (default), **`idm`**, **`hide`**.  
@@ -35,13 +35,12 @@ python -m pip install -e . --extra-index-url https://download.pytorch.org/whl/cu
 
 ### uv
 
-The checked environment is `XiconWAM/.venv` (Python 3.10.12). Ordinary packages come from the Tsinghua PyPI mirror. `torch==2.7.1+cu128` and `torchvision==0.22.1+cu128` are not on that mirror; `pyproject.toml` sends only those two packages to `https://download.pytorch.org/whl/cu128`.
+The lockfile uses PyPI for ordinary packages and the explicit CUDA 12.8 index for `torch==2.7.1+cu128` and `torchvision==0.22.1+cu128`. Use this recipe on the Linux training host. Engine is installed separately from the reviewed wheel as described in the [integration guide](docs/xicon_engine_model_side.md).
 
 ```bash
-uv venv --python /usr/bin/python3.10 .venv
-UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
-  UV_PROJECT_ENVIRONMENT="$PWD/.venv" \
-  uv sync
+uv python install 3.10
+uv venv --python 3.10 .venv
+uv sync --locked
 source .venv/bin/activate
 ```
 
@@ -58,6 +57,10 @@ python -m pip install flash-attn --no-build-isolation
 ```
 
 ## 2. Data and pretrained weights
+
+Dataset paths may be individual LeRobot v3 roots or nested containers discovered
+through `meta/info.json`. See [nested dataset discovery](docs/dataset_discovery.md)
+for inventory commands, deterministic traversal, and cross-robot limitations.
 
 Large assets should live outside the git tree, then symlink into `playground/`:
 
@@ -222,7 +225,7 @@ Simulation (one-time Isaac + assets under `eval/RoboDojo`, see
 ```bash
 cd eval/RoboDojo && bash scripts/install.sh -i && bash scripts/init_assets.sh
 # then from repo root:
-bash eval/XPolicyLab_core/eval.sh \
+XICON_RUN_DIR=/path/to/training/run bash eval/XPolicyLab_core/eval.sh \
   RoboDojo <task> step_015000 arx_x5 joint 0 \
   <policy_gpu> <env_gpu> .venv/bin/python RoboDojo
 ```
@@ -230,6 +233,16 @@ bash eval/XPolicyLab_core/eval.sh \
 The server loads the run `config.yaml`, so architecture stays aligned with the
 checkpoint. Use `action_type=joint`. Real-robot ZMQ serving remains under
 `deployment/` and is separate from this websocket path.
+
+### Xicon Engine 开环验证与真机接口
+
+模型端服务、无权重三相机/14D 演示、Engine pred/GT 开环验证及 robot_control 配合见
+[模型端接入方案](docs/xicon_engine_model_side.md)。RoboDojo 打榜继续使用上面的 XPolicyLab 入口。
+当前已验证通信和合成数据链路，尚未训练/验证实际部署 checkpoint。
+
+可迁移模型包的导出、校验、加载，以及固定验证集和数据错误策略，见
+[部署模型包](docs/deployment_bundle.md)。入口：`xiconwam-bundle export|verify`、
+`xiconwam-serve --bundle /path/to/bundle`。模型包绑定资源完整性，保留当前研究权重加载的兼容行为。
 
 ## 5. Project layout
 
@@ -245,6 +258,6 @@ playground/       local symlinks to datasets and pretrained weights (gitignored)
 
 ## 6. License and attribution
 
-Add a top-level `LICENSE` before publishing. If this tree redistributes or derives from upstream model/code assets (Wan, Cosmos, FLUX, LeRobot, RoboDojo, or related research code), keep those upstream licenses and attributions intact and cite the corresponding papers/repositories in your release notes.
+The project license is in [LICENSE](LICENSE). If this tree redistributes or derives from upstream model/code assets (Wan, Cosmos, FLUX, LeRobot, RoboDojo, or related research code), keep those upstream licenses and attributions intact and cite the corresponding papers/repositories in your release notes.
 
 This repository is a research codebase. Presence of configs or backends does not imply that every combination has been validated end-to-end on RoboDojo or Isaac Sim.

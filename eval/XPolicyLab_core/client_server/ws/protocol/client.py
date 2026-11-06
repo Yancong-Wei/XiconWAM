@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 import sys
@@ -252,11 +253,13 @@ class PolicyEvalClient:
             "ping_interval": self.config.ws_ping_interval_s,
             "ping_timeout": self.config.ws_ping_timeout_s,
         }
-        # `proxy` is only supported by the websockets>=14 asyncio client; passing it
-        # to older releases (e.g. the legacy client shipped with Isaac Sim's
-        # websockets 12) raises TypeError inside loop.create_connection.
-        if self.config.proxy is not None:
+        # Recent websockets versions discover system proxies by default. Pass
+        # None explicitly for direct robot/eval connections, while preserving
+        # compatibility with older Isaac clients without this keyword.
+        if "proxy" in inspect.signature(websockets.connect).parameters:
             connect_kwargs["proxy"] = self.config.proxy
+        elif self.config.proxy is not None:
+            raise ValueError("This websockets version does not support explicit proxies")
         last_err: Exception | None = None
         deadline = (
             asyncio.get_running_loop().time() + self.config.max_connect_seconds

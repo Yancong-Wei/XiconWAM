@@ -43,6 +43,7 @@ class Policy:
 
     def __init__(self, model_cfg: dict[str, Any]):
         self.model_cfg = dict(model_cfg)
+        dry_zeros = bool(self.model_cfg.get("dry_zeros", False))
         action_type = str(self.model_cfg.get("action_type") or "joint")
         if action_type != "joint":
             raise ValueError(
@@ -54,31 +55,37 @@ class Policy:
             base=REPO_ROOT,
         )
         if run_dir is None:
-            raise ValueError("deploy.yml must set run_dir (or pass XICON_RUN_DIR)")
+            if not dry_zeros:
+                raise ValueError("deploy.yml must set run_dir (or pass XICON_RUN_DIR)")
+            run_dir = REPO_ROOT  # Unused by the fixture; no run or weights needed.
 
         checkpoint = _resolve_path(
             self.model_cfg.get("checkpoint"),
             base=REPO_ROOT,
         )
         ckpt_name = self.model_cfg.get("ckpt_name")
-        if checkpoint is None and ckpt_name:
+        if checkpoint is None and ckpt_name and not dry_zeros:
             name = str(ckpt_name).strip()
             if name:
                 weights_dir = run_dir / "checkpoints" / "weights"
-                candidate = weights_dir / (name if name.endswith(".pt") else f"{name}.pt")
+                candidate = weights_dir / (
+                    name if name.endswith(".pt") else f"{name}.pt"
+                )
                 if candidate.is_file():
                     checkpoint = candidate
                 else:
                     raise FileNotFoundError(
                         f"ckpt_name={name!r} not found under {weights_dir}"
                     )
-        if checkpoint is None:
+        if checkpoint is None and not dry_zeros:
             weights = sorted((run_dir / "checkpoints" / "weights").glob("step_*.pt"))
             if not weights:
                 raise FileNotFoundError(
                     f"No step_*.pt under {run_dir / 'checkpoints' / 'weights'}"
                 )
             checkpoint = weights[-1]
+        if checkpoint is None:
+            checkpoint = run_dir / "dry_zeros_checkpoint"
 
         dataset_stats = _resolve_path(
             self.model_cfg.get("dataset_stats"),
@@ -113,7 +120,7 @@ class Policy:
             model_action_dim=model_action_dim,
             num_inference_steps=num_inference_steps,
             num_video_frames=num_video_frames,
-            dry_zeros=bool(self.model_cfg.get("dry_zeros", False)),
+            dry_zeros=dry_zeros,
             device=device,
         )
         self._obs: dict[str, Any] | None = None

@@ -51,6 +51,7 @@ def main() -> None:
     from omegaconf import OmegaConf
 
     from xiconwam.data.lerobot.base_lerobot_dataset import BaseLerobotDataset
+    from xiconwam.data.discovery import discover_dataset_dirs
     from xiconwam.data.lerobot.robot_video_dataset import trained_window
     from xiconwam.data.lerobot.utils.normalizer import save_dataset_stats_to_json
     from xiconwam.kit.config_resolvers import register_default_resolvers
@@ -60,7 +61,7 @@ def main() -> None:
         cfg = compose(config_name=args.config_name, overrides=list(args.overrides))
 
     train_cfg = cfg.data.train
-    dataset_dirs = [str(path) for path in train_cfg.dataset_dirs]
+    dataset_dirs = discover_dataset_dirs(train_cfg.dataset_dirs)
     for dataset_dir in dataset_dirs:
         root = Path(dataset_dir)
         if not root.is_dir():

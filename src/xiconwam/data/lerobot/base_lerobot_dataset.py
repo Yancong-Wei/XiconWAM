@@ -10,10 +10,9 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from xiconwam.kit.logging_config import get_logger
 from .processors.base_processor import BaseProcessor
 from .resources import reuse_during_construction, shared_resource
+from xiconwam.data.discovery import discover_dataset_dirs
 
 logger = get_logger(__name__)
-
-MAX_GETITEM_ATTEMPT = 5
 
 
 def resolve_image_obs_indices(
@@ -53,7 +52,10 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         global_sample_stride: int = 1,
         image_obs_indices: Optional[Sequence[int]] = None,
     ):
-        dataset_dirs = [os.path.normpath(ds_dir) for ds_dir in dataset_dirs]
+        dataset_dirs = discover_dataset_dirs(dataset_dirs)
+        logger.info(
+            "Resolved LeRobot dataset roots (%d): %s", len(dataset_dirs), dataset_dirs
+        )
         assert len(dataset_dirs) > 0, "At least one dataset directory is required"
         assert past_action_size == 0
         assert past_obs_size == 0
@@ -231,34 +233,15 @@ class BaseLerobotDataset(torch.utils.data.Dataset):
         return sample
 
     def __getitem__(self, idx):
-        if idx >= len(self):
+        if idx < 0 or idx >= len(self):
             raise IndexError(f"Index {idx} out of bounds {len(self)}.")
 
-        sample_idx = idx
-        attempt = 0
-        last_exception: Optional[Exception] = None
-        while attempt < MAX_GETITEM_ATTEMPT:
-            try:
-                lerobot_sample = self.multi_dataset[sample_idx]
-                lerobot_sample = self._split_lerobot_sample(lerobot_sample)
-                break
-            except Exception as err:
-                attempt += 1
-                last_exception = err
-                logger.warning(
-                    f"Error loading sample {sample_idx} (attempt {attempt}). "
-                    "Retrying with a random index. "
-                    f"Error: {err}"
-                )
-                sample_idx = np.random.randint(len(self))
-        else:
-            raise RuntimeError(
-                f"Failed to load a valid sample after {MAX_GETITEM_ATTEMPT} attempts "
-                f"for index {idx}."
-            ) from last_exception
+        # The window dataset owns bounded same-index I/O retries. Propagate the
+        # original error so a corrupt held-out window cannot become another sample.
+        lerobot_sample = self._split_lerobot_sample(self.multi_dataset[idx])
 
         sample = {
-            "idx": sample_idx,
+            "idx": idx,
             "task": lerobot_sample["task"],
             "action": {},
             "state": {},

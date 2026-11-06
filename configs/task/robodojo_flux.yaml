@@ -24,6 +24,8 @@ save_every: 3000
 checkpoint_save_limit: 3
 eval_every: 1000
 eval_num_inference_steps: 10
+eval_num_samples: 4  # Fixed windows per source across all ranks; 0 = all windows.
+eval_seed: 42
 eval_save_video: false
 
 gradient_accumulation_steps: 1

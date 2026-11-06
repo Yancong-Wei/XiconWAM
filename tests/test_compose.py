@@ -145,6 +145,8 @@ class ComposeTest(unittest.TestCase):
 
     def test_mixture_data_composes(self):
         cfg = self._compose("task/robodojo_wan", "data=mixture")
+        OmegaConf.resolve(cfg)
+        self.assertFalse(cfg.data.train._recursive_)
         self.assertEqual(
             cfg.data.train._target_, "xiconwam.data.mixture.build_mixture_dataset"
         )

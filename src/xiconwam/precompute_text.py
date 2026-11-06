@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from xiconwam.data.lerobot.lerobot.datasets.utils import load_info, load_tasks
 from xiconwam.data.lerobot.prompts import DEFAULT_PROMPT
+from xiconwam.data.discovery import discover_dataset_dirs
 from xiconwam.data.lerobot.text_embedding_cache import (
     build_text_embedding_payload,
     prompt_hash,
@@ -61,7 +62,7 @@ def dataset_text_settings(cfg):
 def read_unique_prompts(dataset_dirs: list[str]) -> list[str]:
     prompts: list[str] = []
     seen: set[str] = set()
-    for ds_dir in dataset_dirs:
+    for ds_dir in discover_dataset_dirs(dataset_dirs):
         root = Path(ds_dir)
         version = str(load_info(root).get("codebase_version"))
         if version != "v3.0":

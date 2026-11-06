@@ -27,6 +27,7 @@ device: cuda
 default_instruction: null
 dry_zeros: false
 
-run_dir: runs/robodojo_wan/2026-11-03_23-48-11
-checkpoint: runs/robodojo_wan/2026-11-03_23-48-11/checkpoints/weights/step_015000.pt
-dataset_stats: runs/robodojo_wan/2026-11-03_23-48-11/dataset_stats.json
+# Set XICON_RUN_DIR for real evaluation. ckpt_name from eval.sh selects its weight.
+run_dir: null
+checkpoint: null
+dataset_stats: null
