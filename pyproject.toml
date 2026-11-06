@@ -39,7 +39,14 @@ dependencies = [
   "wandb==0.23.1",
 ]
 
+[project.optional-dependencies]
+engine = ["xicon-engine==0.1.0.dev0"]
+engine-validation = ["xicon-engine[validation]==0.1.0.dev0"]
+
 [project.scripts]
+xiconwam-bundle = "xiconwam.deployment.bundle:main"
+xiconwam-engine-smoke = "xiconwam.deployment.smoke:main"
+xiconwam-serve = "xiconwam.deployment.serve:main"
 xiconwam-train = "xiconwam.train:main"
 xiconwam-prepare-action-expert = "xiconwam.prepare_action_expert:main"
 xiconwam-precompute-text = "xiconwam.precompute_text:main"

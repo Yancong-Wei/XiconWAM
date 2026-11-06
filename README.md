@@ -1,6 +1,6 @@
 # XiconWAM
 
-XiconWAM trains dual-stream world-action policies on frozen video backbones for robot manipulation.
+XiconWAM trains dual-stream world-action policies with pretrained video backbones for robot manipulation. The default trainer updates the joint DiT and state encoder while keeping the VAE and text encoder frozen.
 
 Supported vision towers: **Wan2.2-TI2V-5B**, **Cosmos-Predict2.5-2B**, **FLUX.2-klein-4B**.  
 Supported policy heads: **`mot`** (default), **`idm`**, **`hide`**.  
@@ -183,6 +183,16 @@ XICON_CHECKPOINT_PATH=/path/to/run/checkpoints/weights/step_003000.pt \
 
 The server loads the run `config.yaml`, so architecture, vision tower, and LoRA settings stay aligned with the checkpoint. With `num_frames: 33` and `action_video_freq_ratio: 4`, the model observes 9 frames and predicts 32 action steps; the robot executes `replan_steps` (default 10) before replanning.
 
+### Xicon Engine 开环验证与真机接口
+
+模型端服务、无权重三相机/14D 演示、Engine pred/GT 开环验证及 robot_control 配合见
+[模型端接入方案](docs/xicon_engine_model_side.md)。RoboDojo 打榜继续使用上面的 XPolicyLab 入口。
+当前已验证通信和合成数据链路，尚未训练/验证实际部署 checkpoint。
+
+可迁移模型包的导出、校验、加载，以及固定验证集和数据错误策略，见
+[部署模型包](docs/deployment_bundle.md)。入口：`xiconwam-bundle export|verify`、
+`xiconwam-serve --bundle /path/to/bundle`。模型包绑定资源完整性，保留当前研究权重加载的兼容行为。
+
 ## 5. Project layout
 
 ```text
@@ -196,6 +206,6 @@ playground/       local symlinks to datasets and pretrained weights (gitignored)
 
 ## 6. License and attribution
 
-Add a top-level `LICENSE` before publishing. If this tree redistributes or derives from upstream model/code assets (Wan, Cosmos, FLUX, LeRobot, RoboDojo, or related research code), keep those upstream licenses and attributions intact and cite the corresponding papers/repositories in your release notes.
+The project license is in [LICENSE](LICENSE). If this tree redistributes or derives from upstream model/code assets (Wan, Cosmos, FLUX, LeRobot, RoboDojo, or related research code), keep those upstream licenses and attributions intact and cite the corresponding papers/repositories in your release notes.
 
 This repository is a research codebase. Presence of configs or backends does not imply that every combination has been validated end-to-end on RoboDojo or Isaac Sim.
