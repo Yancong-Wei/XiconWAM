@@ -1,34 +1,17 @@
-import logging
+"""Deterministic, source-aware validation on fixed held-out windows."""
+
 import json
-import inspect
 import math
 import os
-import re
-import shutil
-from contextlib import nullcontext
-from importlib.metadata import version as package_version
-from pathlib import Path
-import time
+import random
+from contextlib import contextmanager
 
 import numpy as np
 import torch
-from accelerate import Accelerator
-from accelerate.utils import DistributedType
-from omegaconf import DictConfig, OmegaConf
+from accelerate.utils import gather_object
 from PIL import Image
-from torch.optim.lr_scheduler import (
-    ConstantLR,
-    CosineAnnealingLR,
-    LinearLR,
-    SequentialLR,
-)
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 
-from xiconwam.kit.fs import ensure_dir
-from xiconwam.kit.logging_config import get_logger, setup_logging
-from xiconwam.kit.pytorch_utils import set_global_seed, normalize_mixed_precision
-from xiconwam.kit.samplers import ResumableEpochSampler
+from xiconwam.engine.metrics import action_error_metrics
 from xiconwam.kit.video_io import save_mp4
 from xiconwam.kit.video_metrics import (
     pil_frames_to_video_tensor,
@@ -36,54 +19,23 @@ from xiconwam.kit.video_metrics import (
     video_ssim_triplet,
 )
 
-logger = get_logger(__name__)
 
-
-def _cfg_none(value) -> bool:
-    if value is None:
-        return True
-    # OmegaConf.is_none exists in 2.4+; 2.3 stores YAML null as Python None.
-    is_none = getattr(OmegaConf, "is_none", None)
-    return bool(is_none(value)) if callable(is_none) else False
-
-
-class DataLoaderWorkerInit:
-    def __init__(self, base_worker_init_fn, worker_threads: int):
-        self.base_worker_init_fn = base_worker_init_fn
-        self.worker_threads = int(worker_threads)
-
-    def __call__(self, worker_id: int):
-        if self.base_worker_init_fn is not None:
-            self.base_worker_init_fn(worker_id)
-        if self.worker_threads > 0:
-            torch.set_num_threads(self.worker_threads)
-
-
-def _count_parameters(module, trainable_only: bool = False) -> int:
-    return sum(
-        p.numel() for p in module.parameters() if not trainable_only or p.requires_grad
-    )
-
-
-def _forward_training_model(model, sample):
-    output = model(sample)
-    if not isinstance(output, tuple) or len(output) != 2:
-        raise TypeError(
-            "Training model forward must return a `(loss, metrics)` tuple, "
-            f"got {type(output).__name__}."
-        )
-    loss, metrics = output
-    if not isinstance(loss, torch.Tensor) or loss.ndim != 0:
-        raise TypeError(
-            "Training model forward must return a scalar tensor as loss, "
-            f"got {type(loss).__name__} with shape={getattr(loss, 'shape', None)}."
-        )
-    if not isinstance(metrics, dict):
-        raise TypeError(
-            "Training model forward must return a dict as metrics, "
-            f"got {type(metrics).__name__}."
-        )
-    return loss, metrics
+@contextmanager
+def evaluation_rng(seed, device):
+    numpy_state, python_state = np.random.get_state(), random.getstate()
+    devices = [torch.device(device)] if torch.device(device).type == "cuda" else []
+    try:
+        with torch.random.fork_rng(devices=devices):
+            torch.random.default_generator.manual_seed(seed)
+            if devices:
+                with torch.cuda.device(device):
+                    torch.cuda.manual_seed(seed)
+            np.random.seed(seed % (2**32))
+            random.seed(seed)
+            yield
+    finally:
+        np.random.set_state(numpy_state)
+        random.setstate(python_state)
 
 
 class EvaluateMixin:
@@ -102,6 +54,11 @@ class EvaluateMixin:
             ("proprio", 2),
             ("context", 2),
             ("context_mask", 1),
+            ("action_is_pad", 1),
+            ("action_dim_is_pad", 1),
+            ("image_is_pad", 1),
+            ("proprio_is_pad", 1),
+            ("proprio_dim_is_pad", 1),
         ):
             value = sample.get(key)
             if value is not None and value.ndim != rank:
@@ -118,21 +75,86 @@ class EvaluateMixin:
         result["action_horizon"] = action_horizon
         return result
 
+    def _validation_sources(self):
+        dataset = self.val_dataset
+        if hasattr(dataset, "datasets") and hasattr(dataset, "names"):
+            return list(zip(dataset.names, dataset.datasets))
+        return [("default", dataset)]
+
     @torch.inference_mode()
     def evaluate(self):
         if self.val_dataset is None:
             return None
-
         model = self.accelerator.unwrap_model(self.model)
-        was_dit_training = model.dit.training
+        was_training = model.dit.training
+        records, selection = [], {}
+        self._eval_video_index = 0
+        world = self.accelerator.num_processes
+        rank = self.accelerator.process_index
+        seed = int(self.cfg.get("eval_seed", 42))
+        limit = int(self.cfg.get("eval_num_samples", 4))
+        if limit < 0:
+            raise ValueError("eval_num_samples must be >= 0 (0 evaluates all windows)")
         model.eval()
+        try:
+            for source, dataset in self._validation_sources():
+                if len(dataset) == 0:
+                    raise ValueError(f"Empty validation source: {source}")
+                size = min(limit, len(dataset)) if limit else len(dataset)
+                indices = (
+                    np.random.default_rng(seed)
+                    .choice(len(dataset), size=size, replace=False)
+                    .tolist()
+                )
+                selection[source] = indices
+                # Equal forward counts on all ranks, including ZeRO-3. Repeated
+                # padding work is discarded rather than counted twice.
+                for round_index in range(math.ceil(size / world)):
+                    position = round_index * world + rank
+                    index = indices[position % size]
+                    with evaluation_rng(seed + index, model.device):
+                        sample = self._to_batched_eval_sample(dataset[index])
+                        result, weights = self._evaluate_window(
+                            model, sample, dataset, seed + index
+                        )
+                    if position < size:
+                        records.append((source, result, weights))
+            records = gather_object(records)
+        finally:
+            if was_training:
+                self._set_dit_only_train_mode()
+        totals = {}
+        video_path = None
+        for source, metrics, weights in records:
+            path = metrics.pop("video_path", None)
+            video_path = video_path or path
+            for key, value in metrics.items():
+                for name in (key, f"sources/{source}/{key}"):
+                    summed, count = totals.get(name, (0.0, 0))
+                    weight = weights.get(key, 1)
+                    totals[name] = (summed + value * weight, count + weight)
+        result = {
+            name: value / count for name, (value, count) in totals.items() if count
+        }
+        result["video_path"] = video_path
+        result["num_windows"] = len(records)
+        if self.accelerator.is_main_process:
+            report = {
+                "step": self.global_step,
+                "seed": seed,
+                "selected_indices": selection,
+                "metrics": result,
+                "metric_counts": {key: count for key, (_, count) in totals.items()},
+                "action_l2_definition": "mean squared error in physical action coordinates",
+            }
+            path = os.path.join(self.eval_dir, f"step_{self.global_step:06d}.json")
+            temporary = path + ".tmp"
+            with open(temporary, "w") as handle:
+                json.dump(report, handle, indent=2, allow_nan=False)
+            os.replace(temporary, path)
+        return result
 
-        rng = torch.Generator(device="cpu").manual_seed(
-            self.global_step + self.accelerator.process_index
-        )
-        eval_index = torch.randint(0, len(self.val_dataset), (1,), generator=rng).item()
-        sample = self._to_batched_eval_sample(self.val_dataset[eval_index])
-
+    def _evaluate_window(self, model, sample, dataset, seed):
         with self.accelerator.autocast():
             val_loss, _ = model.training_loss(sample)
             val_loss = val_loss.float().item()
@@ -166,7 +188,7 @@ class EvaluateMixin:
             "text_cfg_scale": 1.0,
             "action_cfg_scale": 1.0,
             "num_inference_steps": self.eval_num_inference_steps,
-            "seed": 42,
+            "seed": seed,
         }
         if sample["context"] is not None:
             infer_kwargs["prompt"] = None
@@ -199,67 +221,23 @@ class EvaluateMixin:
         def metric_view(video):
             return video if metric_frames is None else video[:, list(metric_frames)]
 
-        psnr_rollout_vs_gt = video_psnr(
-            pred=metric_view(pred_video_tensor), target=metric_view(gt_video_tensor)
-        )
-
-        action_l1 = None
-        action_l2 = None
+        action_metrics, action_weights = {}, {}
         if action is not None and pred_action is not None:
             if sample["proprio"] is None:
-                raise ValueError(
-                    "Eval sample must contain `proprio` for action denormalization."
-                )
-            proprio = sample["proprio"].detach().to(device="cpu", dtype=torch.float32)
-
-            processor = self.val_dataset.lerobot_dataset.processor
-
-            denorm_actions = {}
-            action_meta = processor.shape_meta["action"]
-            state_meta = processor.shape_meta["state"]
-            for action_name, raw_action in (("pred", pred_action), ("gt", action)):
-                if raw_action.ndim != 2:
-                    raise ValueError(
-                        f"{action_name} action must be [T,D], got {tuple(raw_action.shape)}."
-                    )
-                action_btd = raw_action.unsqueeze(0)
-                action_btd = action_btd.detach().to(device="cpu", dtype=torch.float32)
-
-                batch = {
-                    "action": action_btd,
-                    "state": proprio,
-                }
-                batch = processor.action_state_merger.backward(batch)
-                batch = processor.normalizer.backward(batch)
-                merged_batch = {
-                    "action": {
-                        meta["key"]: batch["action"][meta["key"]].squeeze(0)
-                        for meta in action_meta
-                    },
-                    "state": {
-                        meta["key"]: batch["state"][meta["key"]].squeeze(0)
-                        for meta in state_meta
-                    },
-                }
-                merged_batch = processor.action_state_merger.forward(merged_batch)
-                denorm_action = merged_batch["action"].unsqueeze(0)
-                if denorm_action.ndim != 3 or denorm_action.shape[0] != 1:
-                    raise ValueError(
-                        f"Denormalized {action_name} action must have shape [1, T, D], got {tuple(denorm_action.shape)}"
-                    )
-                denorm_actions[action_name] = denorm_action
-
-            pred_action_denorm = denorm_actions["pred"]
-            gt_action_denorm = denorm_actions["gt"]
-
-            if pred_action_denorm.shape != gt_action_denorm.shape:
-                raise ValueError(
-                    "Predicted action/GT action shape mismatch after denormalization: "
-                    f"pred={tuple(pred_action_denorm.shape)} vs gt={tuple(gt_action_denorm.shape)}"
-                )
-            action_diff = pred_action_denorm - gt_action_denorm
-            action_l1 = action_diff.abs().mean().item()
-            action_l2 = action_diff.pow(2).mean().item()
+                raise ValueError("Eval requires proprio for action denormalization")
+            processor = dataset.lerobot_dataset.processor
+            action_metrics, action_weights = action_error_metrics(
+                processor,
+                pred_action,
+                action,
+                sample["proprio"],
+                None if sample["action_is_pad"] is None else sample["action_is_pad"][0],
+                (
+                    None
+                    if sample["action_dim_is_pad"] is None
+                    else sample["action_dim_is_pad"][0]
+                ),
+            )
 
         gt_video_batch = video0.unsqueeze(0).to(
             device=model.device, dtype=model.torch_dtype
@@ -278,69 +256,44 @@ class EvaluateMixin:
             f"vae={tuple(vae_video_tensor.shape)} vs gt={tuple(gt_video_tensor.shape)}"
         )
 
-        psnr_decode_vs_gt = video_psnr(
-            pred=metric_view(vae_video_tensor), target=metric_view(gt_video_tensor)
-        )
-
-        psnr_rollout_vs_decode = video_psnr(
-            pred=metric_view(pred_video_tensor), target=metric_view(vae_video_tensor)
-        )
-        ssim_rollout_vs_gt, ssim_decode_vs_gt, ssim_rollout_vs_decode = (
-            video_ssim_triplet(
-                metric_view(pred_video_tensor),
-                metric_view(gt_video_tensor),
-                metric_view(vae_video_tensor),
+        # Exclude padded frames after applying backbone-specific endpoint selection.
+        frame_valid = torch.ones(video0.shape[1], dtype=torch.bool)
+        if sample["image_is_pad"] is not None:
+            frame_valid = ~sample["image_is_pad"][0].detach().cpu().bool()
+            if frame_valid.numel() != video0.shape[1]:
+                frame_valid = frame_valid[[0, -1]]
+        if metric_frames is not None:
+            frame_valid = frame_valid[list(metric_frames)]
+        videos = [
+            metric_view(v)[:, frame_valid]
+            for v in (pred_video_tensor, gt_video_tensor, vae_video_tensor)
+        ]
+        metrics = {"val_loss": val_loss, **action_metrics}
+        weights = {"val_loss": 1, **action_weights}
+        if frame_valid.any():
+            rollout, truth, reconstruction = videos
+            ssim_rg, ssim_dg, ssim_rd = video_ssim_triplet(
+                rollout, truth, reconstruction
             )
+            metrics.update(
+                psnr_rg=video_psnr(rollout, truth),
+                ssim_rg=ssim_rg,
+                psnr_rd=video_psnr(rollout, reconstruction),
+                ssim_rd=ssim_rd,
+                psnr_dg=video_psnr(reconstruction, truth),
+                ssim_dg=ssim_dg,
+            )
+            weights.update(
+                {
+                    key: int(frame_valid.sum())
+                    for key in metrics
+                    if key.startswith(("psnr_", "ssim_"))
+                }
+            )
+        metrics["video_path"] = self._save_eval_video(
+            pred_video_tensor, vae_video_tensor, gt_video_tensor
         )
-
-        video_path = self._save_eval_video(
-            pred_video_tensor,
-            vae_video_tensor,
-            gt_video_tensor,
-        )
-
-        local_metrics = torch.tensor(
-            [
-                float(val_loss),
-                float(psnr_rollout_vs_gt),
-                float(ssim_rollout_vs_gt),
-                float(psnr_rollout_vs_decode),
-                float(ssim_rollout_vs_decode),
-                float(psnr_decode_vs_gt),
-                float(ssim_decode_vs_gt),
-                float(action_l2) if action_l2 is not None else -1.0,
-                float(action_l1) if action_l1 is not None else -1.0,
-            ],
-            device=self.accelerator.device,
-            dtype=torch.float32,
-        ).unsqueeze(0)
-        gathered_metrics = self.accelerator.gather_for_metrics(local_metrics)
-        mean_metrics = gathered_metrics[:, :7].mean(dim=0)
-        action_l2_mean = (
-            gathered_metrics[:, 7].mean().item() if action_l2 is not None else None
-        )
-        action_l1_mean = (
-            gathered_metrics[:, 8].mean().item() if action_l1 is not None else None
-        )
-
-        if was_dit_training:
-            self._set_dit_only_train_mode()
-
-        result = {
-            "val_loss": float(mean_metrics[0].item()),
-            "psnr_rg": float(mean_metrics[1].item()),
-            "ssim_rg": float(mean_metrics[2].item()),
-            "psnr_rd": float(mean_metrics[3].item()),
-            "ssim_rd": float(mean_metrics[4].item()),
-            "psnr_dg": float(mean_metrics[5].item()),
-            "ssim_dg": float(mean_metrics[6].item()),
-            "video_path": video_path,
-        }
-        if action_l2_mean is not None:
-            result["action_l2"] = float(action_l2_mean)
-        if action_l1_mean is not None:
-            result["action_l1"] = float(action_l1_mean)
-        return result
+        return metrics, weights
 
     def _save_eval_video(
         self,
@@ -365,7 +318,8 @@ class EvaluateMixin:
 
         video_path = os.path.join(
             self.eval_dir,
-            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}.mp4",
+            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}_window_{getattr(self, '_eval_video_index', 0):04d}.mp4",
         )
+        self._eval_video_index = getattr(self, "_eval_video_index", 0) + 1
         save_mp4(stitched_frames, video_path, fps=8)
         return video_path

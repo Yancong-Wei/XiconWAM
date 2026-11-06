@@ -440,9 +440,32 @@ def validation_dataset_config(data_cfg: DictConfig) -> DictConfig:
 
 @reuse_during_construction
 def build_datasets(data_cfg: DictConfig):
+    from accelerate import PartialState
     from xiconwam.kit import misc
 
     train_ds = instantiate(data_cfg.train)
+    PartialState().wait_for_everyone()  # Rank 0 must finish writing statistics first.
+    # Bind the run config to the exact saved training statistics. Mixtures need
+    # one path per source, including when statistics were computed on this run.
+    source_stats = {}
+    if hasattr(train_ds, "datasets") and hasattr(train_ds, "names"):
+        for name, source in zip(train_ds.names, train_ds.datasets):
+            path = getattr(source, "norm_stats_path", None)
+            if path:
+                source_stats[name] = path
+                OmegaConf.update(
+                    data_cfg.train.sources[name].config,
+                    "pretrained_norm_stats",
+                    path,
+                    force_add=True,
+                )
+    elif getattr(train_ds, "norm_stats_path", None):
+        OmegaConf.update(
+            data_cfg.train,
+            "pretrained_norm_stats",
+            train_ds.norm_stats_path,
+            force_add=True,
+        )
     val_cfg = validation_dataset_config(data_cfg)
     train_stats_path = data_cfg.train.get("pretrained_norm_stats")
     default_stats_path = os.path.join(misc.get_work_dir(), "dataset_stats.json")
@@ -452,6 +475,8 @@ def build_datasets(data_cfg: DictConfig):
         "MixtureDataset"
     )
     kwargs = {}
+    if is_mixture and source_stats:
+        kwargs["source_norm_stats"] = source_stats
     if val_stats_path or train_stats_path:
         kwargs["pretrained_norm_stats"] = val_stats_path or train_stats_path
     elif not is_mixture:
@@ -502,6 +527,12 @@ def run_training(cfg: DictConfig):
         inference_cross_kv_reuse=cfg.get("inference_cross_kv_reuse", True),
     )
     train_ds, val_ds = build_datasets(cfg.data)
+    if accelerator.is_main_process:
+        # Include derived normalization bindings in the deployable run config.
+        OmegaConf.save(
+            OmegaConf.to_container(cfg, resolve=True),
+            Path(cfg.output_dir) / "config.yaml",
+        )
     trainer = TrainSession(
         cfg=cfg,
         accelerator=accelerator,

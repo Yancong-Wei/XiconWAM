@@ -491,6 +491,22 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
             return
         self.wandb_run.log(payload, step=self.global_step)
 
+    def _log_evaluation(self, metrics):
+        # A source can have no valid target frames (e.g. a padded endpoint).
+        # Missing metrics stay absent rather than becoming zeros or NaNs.
+        description = f"[eval] step={self.global_step}"
+        for key in ("val_loss", "psnr_rd", "ssim_rd", "action_l2", "action_l1"):
+            if key in metrics:
+                description += f" {key}={metrics[key]:.6f}"
+        logger.info(description)
+        self._wandb_log(
+            {
+                f"eval/{key}": float(value)
+                for key, value in metrics.items()
+                if isinstance(value, (int, float))
+            }
+        )
+
     def _finish_wandb(self):
         if self.wandb_run is None:
             return
@@ -915,34 +931,7 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
                     metrics = self.evaluate()
                     self.accelerator.wait_for_everyone()
                     if metrics is not None and self.accelerator.is_main_process:
-                        description = (
-                            "[eval] step=%d val_loss=%.6f infer_psnr=%.4f infer_ssim=%.4f"
-                            % (
-                                self.global_step,
-                                metrics["val_loss"],
-                                metrics["psnr_rd"],
-                                metrics["ssim_rd"],
-                            )
-                        )
-                        if "action_l2" in metrics:
-                            description += " action_l2=%.4f" % metrics["action_l2"]
-                        if "action_l1" in metrics:
-                            description += " action_l1=%.4f" % metrics["action_l1"]
-                        logger.info(description)
-                        eval_payload = {
-                            "eval/val_loss": float(metrics["val_loss"]),
-                            "eval/psnr_rg": float(metrics["psnr_rg"]),
-                            "eval/ssim_rg": float(metrics["ssim_rg"]),
-                            "eval/psnr_rd": float(metrics["psnr_rd"]),
-                            "eval/ssim_rd": float(metrics["ssim_rd"]),
-                            "eval/psnr_dg": float(metrics["psnr_dg"]),
-                            "eval/ssim_dg": float(metrics["ssim_dg"]),
-                        }
-                        if "action_l2" in metrics:
-                            eval_payload["eval/action_l2"] = float(metrics["action_l2"])
-                        if "action_l1" in metrics:
-                            eval_payload["eval/action_l1"] = float(metrics["action_l1"])
-                        self._wandb_log(eval_payload)
+                        self._log_evaluation(metrics)
 
                 if self.save_every > 0 and self.global_step % self.save_every == 0:
                     ckpt_info = self.save_checkpoint()

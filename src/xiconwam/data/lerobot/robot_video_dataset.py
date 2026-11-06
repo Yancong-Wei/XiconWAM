@@ -1,8 +1,9 @@
-import os
 from pathlib import Path
 from typing import Optional
 import numpy as np
-import traceback
+import errno
+import time
+from collections import Counter
 import torch
 import torchvision.transforms.functional as transforms_F
 
@@ -80,9 +81,12 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
         override_instruction: Optional[str] = None,
         mixed_precision: Optional[str] = None,
         load_text_encoder_on_miss: bool = False,
+        preflight_text_cache: bool = True,
+        max_read_retries: int = 2,
         backbone=None,
         unify_action_map=None,
         unify_state_map=None,
+        norm_stats_output=None,
     ):
         del unify_action_map, unify_state_map
         _, action_steps = trained_window(num_frames, action_video_freq_ratio)
@@ -136,6 +140,11 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
         self.concat_multi_camera = concat_multi_camera
         self.override_instruction = override_instruction
         self.load_text_encoder_on_miss = bool(load_text_encoder_on_miss)
+        self.is_training_set = bool(is_training_set)
+        self.max_read_retries = int(max_read_retries)
+        if self.max_read_retries < 0:
+            raise ValueError("max_read_retries must be non-negative")
+        self.read_error_counts = Counter()
         if isinstance(backbone, DictConfig):
             backbone = OmegaConf.to_container(backbone, resolve=True)
         self.backbone = backbone
@@ -151,6 +160,18 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
             args={"mean": 0.5, "std": 0.5},
         )
         if processor is not None:
+            self.norm_stats_path = str(
+                Path(
+                    pretrained_norm_stats
+                    if not is_training_set and pretrained_norm_stats
+                    else norm_stats_output
+                    or Path(misc.get_work_dir()) / "dataset_stats.json"
+                )
+                .expanduser()
+                .resolve()
+            )
+            if is_training_set and PartialState().is_main_process:
+                Path(self.norm_stats_path).parent.mkdir(parents=True, exist_ok=True)
             if isinstance(processor, DictConfig):
                 processor = instantiate(processor)
             if not pretrained_norm_stats:
@@ -161,8 +182,7 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
                 if PartialState().is_main_process:
                     logger.info("Calculating dataset stats for normalization...")
                     dataset_stats = self.lerobot_dataset.get_dataset_stats(processor)
-                    work_dir = misc.get_work_dir()
-                    stats_output = os.path.join(work_dir, "dataset_stats.json")
+                    stats_output = self.norm_stats_path
                     shared_resource(
                         ("saved_stats", stats_output, str(pretrained_norm_stats)),
                         lambda: save_dataset_stats_to_json(dataset_stats, stats_output),
@@ -179,9 +199,8 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
             else:
                 dataset_stats = load_dataset_stats_from_json(pretrained_norm_stats)
                 logger.info(f"Using dataset stats: {pretrained_norm_stats}")
-                if PartialState().is_main_process:
-                    work_dir = misc.get_work_dir()
-                    stats_output = os.path.join(work_dir, "dataset_stats.json")
+                if is_training_set and PartialState().is_main_process:
+                    stats_output = self.norm_stats_path
                     shared_resource(
                         ("saved_stats", stats_output, str(pretrained_norm_stats)),
                         lambda: save_dataset_stats_to_json(dataset_stats, stats_output),
@@ -190,6 +209,68 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
             processor.include_gt_action = False
             processor.set_normalizer_from_stats(dataset_stats)
             self.lerobot_dataset.set_processor(processor)
+            if preflight_text_cache:
+                self._preflight_text_cache()
+
+    def _preflight_text_cache(self):
+        """Validate the finite instruction set before the DataLoader starts."""
+        processor = self.lerobot_dataset.processor
+        if self.override_instruction is None and processor.drop_high_level_prob != 1.0:
+            raise ValueError(
+                "Text-cache preflight requires drop_high_level_prob=1; precompute deterministic instructions"
+            )
+        if self.override_instruction is not None:
+            # _get uses an explicit override verbatim, including language markers.
+            prompts = {DEFAULT_PROMPT.format(task=self.override_instruction)}
+        else:
+            tasks = {
+                str(task)
+                for dataset in self.lerobot_dataset.multi_dataset._datasets
+                for task in dataset.meta.tasks.values()
+            }
+            prompts = {
+                DEFAULT_PROMPT.format(
+                    task=processor.augment_instruction({"task": task})
+                )
+                for task in tasks
+            }
+
+        def check():
+            for prompt in sorted(prompts):
+                filename = text_embedding_cache_filename(
+                    prompt,
+                    self.context_len,
+                    self.text_encoder_id,
+                    dtype=self.text_embedding_dtype,
+                )
+                path = (
+                    None
+                    if self.text_embedding_cache_dir is None
+                    else self.text_embedding_cache_dir / filename
+                )
+                if self.load_text_encoder_on_miss and (
+                    path is None or not path.is_file()
+                ):
+                    logger.warning(
+                        "Text preflight: cache missing for prompt %s; explicit online fallback is enabled",
+                        prompt_hash(prompt),
+                    )
+                    continue
+                self._get_cached_text_context(prompt)
+            return True
+
+        shared_resource(
+            (
+                "text_preflight",
+                str(self.text_embedding_cache_dir),
+                self.context_len,
+                self.text_encoder_id,
+                str(self.text_embedding_dtype),
+                self.load_text_encoder_on_miss,
+                tuple(sorted(prompts)),
+            ),
+            check,
+        )
 
     def __len__(self):
         return len(self.lerobot_dataset)
@@ -200,7 +281,7 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
         for attempt in range(self.max_padding_retry + 1):
             sample = self.lerobot_dataset.__getitem__(sample_idx)
 
-            if not self.skip_padding_as_possible:
+            if not self.skip_padding_as_possible or not self.is_training_set:
                 break
 
             action_is_pad = sample["action_is_pad"]
@@ -380,6 +461,10 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
         return context, context_mask
 
     def _ensure_online_text_encoder(self):
+        if torch.utils.data.get_worker_info() is not None:
+            raise RuntimeError(
+                "Online text encoding inside DataLoader workers is unsupported; precompute the text cache or use num_workers=0"
+            )
         if self._online_text_encoder is not None:
             return self._online_text_encoder
         if self.backbone is None:
@@ -410,13 +495,31 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
         return context, context_mask
 
     def __getitem__(self, idx):
-        try:
-            data = self._get(idx)
-        except Exception as e:
-            print(
-                f"Error processing sample idx {idx}: {e}. Returning a random sample instead."
-            )
-            print(traceback.format_exc())
-            random_idx = np.random.randint(len(self))
-            data = self._get(random_idx)
-        return data
+        retries = self.max_read_retries if self.is_training_set else 0
+        for attempt in range(retries + 1):
+            try:
+                return self._get(idx)
+            except Exception as error:
+                name = type(error).__name__
+                self.read_error_counts[name] += 1
+                transient = isinstance(error, OSError) and error.errno in {
+                    errno.EIO,
+                    errno.ETIMEDOUT,
+                    errno.EAGAIN,
+                    errno.ESTALE,
+                }
+                if transient and attempt < retries:
+                    logger.warning(
+                        "Transient sample read failure: index=%s attempt=%d error=%r counts=%s",
+                        idx,
+                        attempt + 1,
+                        error,
+                        dict(self.read_error_counts),
+                    )
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise RuntimeError(
+                    f"Failed to read sample index={idx} training={self.is_training_set} "
+                    f"datasets={self.lerobot_dataset.dataset_dirs} attempts={attempt + 1} "
+                    f"error={name}: {error}"
+                ) from error

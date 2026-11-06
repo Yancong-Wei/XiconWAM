@@ -7,6 +7,7 @@ Used for multi-source pretrain. Single-source SFT keeps selecting
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
@@ -40,6 +41,9 @@ class MixtureDataset(torch.utils.data.Dataset):
         self._datasets = list(datasets)
         self._base_seed = int(seed)
         self._seed = int(seed)
+        self._epoch = 0
+        # Persistent DataLoader workers observe parent epoch changes too.
+        self._shared_epoch = torch.zeros((), dtype=torch.int64).share_memory_()
         if names is None:
             self._names = [f"source_{i}" for i in range(len(self._datasets))]
         else:
@@ -49,6 +53,8 @@ class MixtureDataset(torch.utils.data.Dataset):
                     f"names length ({len(names)}) != datasets length ({len(self._datasets)})"
                 )
             self._names = [str(n) for n in names]
+        if len(set(self._names)) != len(self._names):
+            raise ValueError("MixtureDataset source names must be unique")
 
         self._validate_contract()
 
@@ -93,7 +99,6 @@ class MixtureDataset(torch.utils.data.Dataset):
                         "MixtureDataset: enabled sub-sources must share the same "
                         f"'{field}', got {name}={value!r} vs {refs[field]!r}"
                     )
-            sample_probe = None
             # Prefer declared packer widths when present.
             action_dim = None
             processor = getattr(ds, "processor", None) or getattr(
@@ -106,12 +111,16 @@ class MixtureDataset(torch.utils.data.Dataset):
                     f"MixtureDataset: source '{name}' action_output_dim={action_dim} "
                     f"!= UNIFY_DIM={UNIFY_DIM}"
                 )
-            del sample_probe
 
     def set_epoch(self, epoch: int) -> None:
+        if int(epoch) < 0:
+            raise ValueError("Mixture epoch must be non-negative")
+        if torch.utils.data.get_worker_info() is None:
+            self._shared_epoch.fill_(int(epoch))
         new_seed = self._base_seed + int(epoch) * 7919
         if new_seed == self._seed:
             return
+        self._epoch = int(epoch)
         self._seed = new_seed
         self._build_index_map()
 
@@ -140,17 +149,26 @@ class MixtureDataset(torch.utils.data.Dataset):
         offset = 0
         for di, n_real, virtual_n in entries:
             combined[offset : offset + virtual_n, 0] = di
-            combined[offset : offset + virtual_n, 1] = (
-                np.arange(virtual_n, dtype=np.int64) % n_real
+            # Rotate through a seeded source permutation. A low-weight source
+            # covers its full population across epochs rather than a prefix.
+            permutation = np.random.default_rng([self._base_seed, di]).permutation(
+                n_real
             )
+            positions = (
+                np.arange(virtual_n, dtype=np.int64) + self._epoch * virtual_n
+            ) % n_real
+            combined[offset : offset + virtual_n, 1] = permutation[positions]
             offset += virtual_n
         np.random.RandomState(self._seed).shuffle(combined.view(np.int64).reshape(-1))
         self._index_map = combined
 
     def __getitem__(self, idx: int) -> dict:
+        epoch = int(self._shared_epoch.item())
+        if epoch != self._epoch:
+            self.set_epoch(epoch)
         di, si = self._index_map[idx]
         di, si = int(di), int(si)
-        sample = self._datasets[di][si]
+        sample = dict(self._datasets[di][si])
         sample["_dataset_index"] = di
         sample["_dataset_name"] = self._names[di]
         return sample
@@ -183,6 +201,7 @@ def build_mixture_dataset(
     seed: int = 42,
     is_training_set: bool = True,
     pretrained_norm_stats: Optional[str] = None,
+    source_norm_stats: Optional[Mapping[str, str]] = None,
     **unused,
 ) -> MixtureDataset:
     """Hydra entry: instantiate enabled sources then wrap as MixtureDataset.
@@ -227,10 +246,22 @@ def build_mixture_dataset(
         raise RuntimeError("MixtureDataset: all sub-datasets are disabled")
 
     sub_datasets = []
+    from xiconwam.kit import misc
+
     for name, cfg in zip(enabled_names, enabled_cfgs):
-        kwargs = {"is_training_set": bool(is_training_set)}
+        if not name or name in {".", ".."} or "/" in name or "\\" in name:
+            raise ValueError(f"Invalid mixture source name: {name!r}")
+        kwargs = {
+            "is_training_set": bool(is_training_set),
+            "norm_stats_output": str(
+                Path(misc.get_work_dir()) / "dataset_stats" / f"{name}.json"
+            ),
+        }
         if pretrained_norm_stats is not None:
             kwargs["pretrained_norm_stats"] = pretrained_norm_stats
+        elif not cfg.get("pretrained_norm_stats") and source_norm_stats:
+            if name in source_norm_stats:
+                kwargs["pretrained_norm_stats"] = source_norm_stats[name]
         sub_datasets.append(instantiate(cfg, **kwargs))
         logger.info(
             "MixtureDataset: loaded source '%s' with %d samples",
