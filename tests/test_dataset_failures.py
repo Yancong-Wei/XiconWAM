@@ -119,3 +119,35 @@ def test_preflight_uses_override_verbatim():
     ds._get_cached_text_context = seen.append
     ds._preflight_text_cache()
     assert seen == [DEFAULT_PROMPT.format(task=ds.override_instruction)]
+
+
+@pytest.mark.parametrize("training", [False, True])
+@pytest.mark.parametrize("transient", [False, True])
+def test_nested_lerobot_reader_preserves_requested_index(
+    training, transient, monkeypatch
+):
+    from xiconwam.data.lerobot.base_lerobot_dataset import BaseLerobotDataset
+
+    calls = []
+    error = (
+        OSError(errno.EIO, "temporary read") if transient else ValueError("bad schema")
+    )
+
+    class Storage:
+        num_frames = 20
+
+        def __getitem__(self, index):
+            calls.append(index)
+            raise error
+
+    inner = BaseLerobotDataset.__new__(BaseLerobotDataset)
+    inner.multi_dataset = Storage()
+    outer = dataset(training)
+    outer._get = inner.__getitem__
+    monkeypatch.setattr(
+        "xiconwam.data.lerobot.robot_video_dataset.time.sleep", lambda _: None
+    )
+    with pytest.raises(RuntimeError, match="index=7") as caught:
+        outer[7]
+    assert caught.value.__cause__ is error
+    assert calls == [7] * (3 if training and transient else 1)
