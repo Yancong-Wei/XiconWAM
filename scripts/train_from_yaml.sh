@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Train from a task YAML. The task file selects data and model configs.
 # Default is 8 GPUs. Override with GPU_IDS / CUDA_VISIBLE_DEVICES.
+# DRY_RUN=1 composes and validates the launch without loading data or models.
 #
 #   bash scripts/train_from_yaml.sh configs/task/robodojo_wan.yaml
 #   GPU_IDS=0,1 bash scripts/train_from_yaml.sh configs/task/robodojo_wan.yaml max_steps=1000
@@ -41,6 +42,14 @@ if ! [[ "${NPROC}" =~ ^[1-9][0-9]*$ ]]; then
   echo "NPROC must be a positive integer, got: ${NPROC}" >&2
   exit 2
 fi
+if (( NPROC > ${#GPU_ARR[@]} )); then
+  echo "NPROC=${NPROC} exceeds the number of visible GPU IDs (${#GPU_ARR[@]})." >&2
+  exit 2
+fi
+if [[ "${ACCELERATE_CONFIG:-}" == "none" && "${NPROC}" != "1" ]]; then
+  echo "ACCELERATE_CONFIG=none only supports one process." >&2
+  exit 2
+fi
 
 RUN_ID="${RUN_ID:-$(date +%Y-%m-%d_%H-%M-%S)}"
 OUT="${ROOT}/runs/${TASK}/${RUN_ID}"
@@ -53,17 +62,21 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 ARGS=("--config-name=task/${TASK}" "output_dir=${OUT}" "$@")
 ZERO_SPEC="$(
-  PYTHONPATH="${ROOT}/src" python - "$ROOT" "$TASK" "$OUT" "$@" << 'PY'
+  PYTHONPATH="${ROOT}/src" python - "$ROOT" "$TASK" "$OUT" "$NPROC" "$@" << 'PY'
 import sys
 from pathlib import Path
 from hydra import compose, initialize_config_dir
 from xiconwam.kit.config_resolvers import register_default_resolvers
+from xiconwam.engine.optimization import validate_global_batch_size
 
 register_default_resolvers()
-root, task, output, *extra = sys.argv[1:]
+root, task, output, nproc, *extra = sys.argv[1:]
 overrides = [f"output_dir={output}", *extra]
 with initialize_config_dir(config_dir=str(Path(root) / "configs"), version_base="1.3"):
     cfg = compose(config_name=f"task/{task}", overrides=overrides)
+global_batch = validate_global_batch_size(cfg, int(nproc))
+print(f"global_batch={global_batch} max_steps={cfg.max_steps} resume={cfg.resume}", file=sys.stderr)
+print(f"group_learning_rate={cfg.model.get('group_learning_rate', None)}", file=sys.stderr)
 zero = cfg.get("zero", 2)
 offload = bool(cfg.get("zero_offload", False))
 text = str(zero)
@@ -108,12 +121,12 @@ EOF
 fi
 
 echo "task=${TASK} gpus=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} zero=${ZERO_SPEC} output=${OUT}"
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  echo "Dry run passed; model and dataset loading skipped."
+  exit 0
+fi
 set -o pipefail
 if [[ "${ACCELERATE_CONFIG}" == "none" ]]; then
-  if [[ "${NPROC}" != "1" ]]; then
-    echo "ACCELERATE_CONFIG=none only supports one process." >&2
-    exit 2
-  fi
   python -m xiconwam.train "${ARGS[@]}" 2>&1 | tee -a "${OUT}/train.log"
 else
   accelerate launch \

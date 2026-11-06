@@ -1,0 +1,30 @@
+# @package _global_
+# Fresh RoboDojo SFT: 4 H20 GPUs, global batch 128, 90k optimizer updates.
+# GPU_IDS=0,1,2,3 bash scripts/train_from_yaml.sh configs/task/robodojo_wan_sft90k.yaml
+defaults:
+  - robodojo_wan
+  - _self_
+
+batch_size: 4
+gradient_accumulation_steps: 8
+expected_global_batch_size: 128
+max_steps: 90000
+max_epochs: null
+resume: null
+
+learning_rate: 1.0e-4
+warmup_ratio: 0.02  # 1,800 optimizer updates, planned over the full fresh run.
+lr_min_ratio: 0.01
+
+save_every: 15000
+checkpoint_save_limit: 3  # Final retained milestones: 60k, 75k, 90k.
+eval_every: 3000
+eval_num_samples: 64
+vae_micro_batch_size: 1
+
+model:
+  group_learning_rate:
+    video: 1.0e-5
+    action: 1.0e-4  # Includes the state encoder and action projections.
+  backbone:
+    use_gradient_checkpointing: true

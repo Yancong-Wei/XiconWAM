@@ -151,6 +151,11 @@ class XiconActor(ObjectiveMixin, RolloutMixin, torch.nn.Module):
     def video_dit(self):
         return self.video_expert
 
+    def optimizer_param_groups(self, learning_rate: float, weight_decay: float):
+        from xiconwam.engine.optimization import policy_optimizer_param_groups
+
+        return policy_optimizer_param_groups(self, learning_rate, weight_decay)
+
     @classmethod
     def from_backbone_pretrained(
         cls,
