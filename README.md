@@ -147,10 +147,6 @@ Caches are written to `playground/datasets/text_embeds_cache/robodojo/<backbone>
 
 A task config selects data, model, batch size, learning rate, schedule, and ZeRO settings. `robodojo_wan`, `robodojo_cosmos`, and `robodojo_flux` share those settings and pin the vision tower. `robodojo_a800` inherits from `robodojo_wan` for single-GPU 80GB. Validation reuses the train dataset config with `is_training_set=false`.
 
-For a fresh 90k-update RoboDojo SFT on four GPUs with global batch 128, use
-[`robodojo_wan_sft90k`](docs/robodojo_sft90k.md). It adds video/action learning-rate
-groups, gradient checkpointing, a batch-size guard, and broader offline validation.
-
 ```text
 configs/task/robodojo_wan.yaml       # backbone wan22 (default 8-GPU entry)
 configs/task/robodojo_cosmos.yaml    # backbone cosmos25

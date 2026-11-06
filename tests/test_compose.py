@@ -81,7 +81,7 @@ class ComposeTest(unittest.TestCase):
         idm = self._compose("task/robodojo_wan", "model=idm")
         self.assertEqual(idm.model.architecture, "idm")
         self.assertEqual(idm.model.video_cond_noise_prob, 0.5)
-        self.assertEqual(idm.max_steps, 30000)
+        self.assertEqual(idm.max_steps, 90000)
         hide = self._compose("task/robodojo_cosmos", "model=hide")
         resolved = OmegaConf.to_container(hide.model, resolve=True)
         self.assertEqual(resolved["architecture"], "hide")

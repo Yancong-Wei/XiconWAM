@@ -177,9 +177,6 @@ def build_model(
         from xiconwam.actor.mot import MoTPolicy
 
         model = _build_policy(MoTPolicy, **common)
-    model.group_learning_rate = (
-        _as_dict(group_learning_rate) if group_learning_rate else {}
-    )
     return _apply_lora(model, _lora_payload(lora, backbone_cfg))
 
 
@@ -502,7 +499,6 @@ def run_training(cfg: DictConfig):
 
     from xiconwam.actor.helpers.inference import configure_model_execution
     from xiconwam.engine.session import TrainSession
-    from xiconwam.engine.optimization import validate_global_batch_size
     from xiconwam.kit import misc
 
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
@@ -511,7 +507,6 @@ def run_training(cfg: DictConfig):
         mixed_precision=mixed_precision,
         step_scheduler_with_optimizer=False,
     )
-    validate_global_batch_size(cfg, accelerator.num_processes)
     setup_logging(
         log_level=logging.INFO,
         is_main_process=accelerator.is_main_process,

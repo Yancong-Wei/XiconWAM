@@ -20,7 +20,7 @@ dataloader_worker_threads: 1
 lr_scheduler_type: cosine
 learning_rate: 1.0e-4
 warmup_ratio: 0.05
-max_steps: 30000
+max_steps: 90000
 max_epochs: null
 log_every: 100
 save_every: 3000

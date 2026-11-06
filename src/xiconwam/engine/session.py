@@ -20,7 +20,6 @@ from torch.optim.lr_scheduler import (
     ConstantLR,
     CosineAnnealingLR,
     LinearLR,
-    LambdaLR,
     SequentialLR,
 )
 from torch.utils.data import DataLoader
@@ -41,7 +40,6 @@ logger = get_logger(__name__)
 
 from xiconwam.engine.checkpoint import CheckpointMixin
 from xiconwam.engine.evaluate import EvaluateMixin
-from xiconwam.engine.optimization import validate_global_batch_size
 from xiconwam.engine.runtime_tuning import (
     apply_deepspeed_runtime_settings,
     maybe_freeze_gc,
@@ -288,7 +286,6 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
         )
 
     def _resolve_train_schedule(self) -> None:
-        validate_global_batch_size(self.cfg, self.accelerator.num_processes)
         dataset_size = len(self.train_dataset)
         if dataset_size <= 0:
             raise ValueError(
@@ -577,9 +574,6 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
         scheduler_type = str(scheduler_type).strip().lower()
         total_train_steps = max(int(total_train_steps), 1)
         warmup_steps = min(max(int(warmup_steps), 0), total_train_steps - 1)
-        min_ratio = float(self.cfg.get("lr_min_ratio", 0.01))
-        if not math.isfinite(min_ratio) or not 0 <= min_ratio <= 1:
-            raise ValueError("lr_min_ratio must be finite and in [0, 1]")
 
         if self.is_deepspeed:
             from deepspeed.runtime.lr_schedules import WarmupCosineLR, WarmupLR
@@ -592,15 +586,13 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
                     warmup_min_ratio=0.0,
                     warmup_num_steps=deepspeed_warmup_steps,
                     warmup_type="linear",
-                    cos_min_ratio=min_ratio,
+                    cos_min_ratio=0.01,
                 )
             if scheduler_type == "constant":
                 return WarmupLR(
                     self.optimizer,
                     warmup_min_lr=0.0,
-                    warmup_max_lr=[
-                        group["lr"] for group in self.optimizer.param_groups
-                    ],
+                    warmup_max_lr=self.learning_rate,
                     warmup_num_steps=deepspeed_warmup_steps,
                     warmup_type="linear",
                 )
@@ -610,26 +602,11 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
             )
 
         remaining_steps = max(total_train_steps - warmup_steps, 1)
-        if (
-            scheduler_type == "cosine"
-            and len({g["lr"] for g in self.optimizer.param_groups}) > 1
-        ):
-            # One multiplier per peak LR preserves the video/action ratio,
-            # including at the end of decay. An absolute eta_min cannot do so.
-            def multiplier(step):
-                if warmup_steps and step < warmup_steps:
-                    return (step + 1) / warmup_steps
-                progress = min(max((step - warmup_steps) / remaining_steps, 0), 1)
-                return (
-                    min_ratio + (1 - min_ratio) * (1 + math.cos(math.pi * progress)) / 2
-                )
-
-            return LambdaLR(self.optimizer, multiplier)
         if scheduler_type == "cosine":
             main_scheduler = CosineAnnealingLR(
                 self.optimizer,
                 T_max=remaining_steps,
-                eta_min=self.optimizer.param_groups[0]["lr"] * min_ratio,
+                eta_min=self.learning_rate * 0.01,
             )
         elif scheduler_type == "constant":
             main_scheduler = ConstantLR(
@@ -926,14 +903,7 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
                         )
                     logger.info(description)
 
-                    group_lrs = {
-                        f"train/lr_{group.get('name', index)}": float(group["lr"])
-                        for index, group in enumerate(self.optimizer.param_groups)
-                    }
-                    logger.info("Optimizer group learning rates: %s", group_lrs)
-
                     wandb_payload = {
-                        **group_lrs,
                         "train/epoch": current_epoch,
                         "train/planned_epochs": planned_epochs,
                         "train/loss_avg": loss_averages["loss_avg"],
