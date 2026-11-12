@@ -114,9 +114,13 @@ class EvaluateMixin:
                     index = indices[position % size]
                     with evaluation_rng(seed + index, model.device):
                         sample = self._to_batched_eval_sample(dataset[index])
-                        result, weights = self._evaluate_window(
-                            model, sample, dataset, seed + index
-                        )
+                        if getattr(model, "video_only", False):
+                            loss, _ = model.training_loss(sample)
+                            result, weights = {"loss_video": float(loss.item())}, {}
+                        else:
+                            result, weights = self._evaluate_window(
+                                model, sample, dataset, seed + index
+                            )
                     if position < size:
                         records.append((source, result, weights))
             records = gather_object(records)
@@ -145,8 +149,9 @@ class EvaluateMixin:
                 "selected_indices": selection,
                 "metrics": result,
                 "metric_counts": {key: count for key, (_, count) in totals.items()},
-                "action_l2_definition": "mean squared error in physical action coordinates",
             }
+            if not getattr(model, "video_only", False):
+                report["action_l2_definition"] = "mean squared error in physical action coordinates"
             path = os.path.join(self.eval_dir, f"step_{self.global_step:06d}.json")
             temporary = path + ".tmp"
             with open(temporary, "w") as handle:

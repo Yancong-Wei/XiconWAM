@@ -10,12 +10,31 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 
-CONFIG_YAML="${1:-}"
-if [[ -z "${CONFIG_YAML}" ]]; then
-  echo "Usage: bash scripts/train_from_yaml.sh configs/task/<task>.yaml [hydra overrides...]" >&2
-  exit 2
+if [[ "${1:-}" == resume=* ]]; then
+  CONFIG_YAML="${ROOT}/configs/task/robodojo_wan.yaml"
+else
+  CONFIG_YAML="${1:-}"
+  if [[ -z "${CONFIG_YAML}" ]]; then
+    echo "Usage: bash scripts/train_from_yaml.sh configs/task/<task>.yaml [--dry-run] [overrides...]" >&2
+    echo "Resume: bash scripts/train_from_yaml.sh resume=/path/to/run [overrides...]" >&2
+    exit 2
+  fi
+  shift
 fi
-shift
+DRY_RUN=false
+OVERRIDES=()
+for argument in "$@"; do
+  if [[ "${argument}" == "--dry-run" ]]; then
+    DRY_RUN=true
+  else
+    OVERRIDES+=("${argument}")
+  fi
+done
+if [[ "${#OVERRIDES[@]}" -gt 0 ]]; then
+  set -- "${OVERRIDES[@]}"
+else
+  set --
+fi
 
 if [[ "${CONFIG_YAML}" != /* ]]; then
   CONFIG_YAML="${ROOT}/${CONFIG_YAML}"
@@ -44,70 +63,27 @@ fi
 
 RUN_ID="${RUN_ID:-$(date +%Y-%m-%d_%H-%M-%S)}"
 OUT="${ROOT}/runs/${TASK}/${RUN_ID}"
-mkdir -p "${OUT}/checkpoints"
-cp "${CONFIG_YAML}" "${OUT}/task.yaml"
 
 export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 ARGS=("--config-name=task/${TASK}" "output_dir=${OUT}" "$@")
-ZERO_SPEC="$(
-  PYTHONPATH="${ROOT}/src" python - "$ROOT" "$TASK" "$OUT" "$@" << 'PY'
-import sys
-from pathlib import Path
-from hydra import compose, initialize_config_dir
-from xiconwam.kit.config_resolvers import register_default_resolvers
-
-register_default_resolvers()
-root, task, output, *extra = sys.argv[1:]
-overrides = [f"output_dir={output}", *extra]
-with initialize_config_dir(config_dir=str(Path(root) / "configs"), version_base="1.3"):
-    cfg = compose(config_name=f"task/{task}", overrides=overrides)
-zero = cfg.get("zero", 2)
-offload = bool(cfg.get("zero_offload", False))
-text = str(zero)
-if text.endswith(".json") or "/" in text:
-    path = Path(text)
-    if not path.is_absolute():
-        path = Path(root) / path
-    print(path)
-else:
-    stage = int(text)
-    name = {
-        (1, False): "ds_zero1_config.json",
-        (2, False): "ds_zero2_config.json",
-        (2, True): "ds_zero2_offload_config.json",
-        (3, False): "ds_zero3_config.json",
-        (3, True): "ds_zero3_offload_config.json",
-    }.get((stage, offload))
-    if name is None:
-        raise SystemExit(f"Unsupported zero={stage} zero_offload={offload}")
-    print(Path(root) / "configs" / "deepspeed" / name)
-PY
-)"
+if [[ "${DRY_RUN}" == "true" ]]; then
+  python -m xiconwam.engine.launch_config --task "${TASK}" --output "${OUT}" \
+    --processes "${NPROC}" --dry-run "$@"
+  exit 0
+fi
+mkdir -p "${OUT}/checkpoints"
+cp "${CONFIG_YAML}" "${OUT}/task.yaml"
 ACCELERATE_CONFIG="${ACCELERATE_CONFIG:-}"
 if [[ -z "${ACCELERATE_CONFIG}" ]]; then
   ACCELERATE_CONFIG="${OUT}/accelerate.yaml"
-  cat > "${ACCELERATE_CONFIG}" << EOF
-compute_environment: LOCAL_MACHINE
-debug: false
-distributed_type: DEEPSPEED
-deepspeed_config:
-  deepspeed_config_file: ${ZERO_SPEC}
-  zero3_init_flag: false
-mixed_precision: null
-machine_rank: 0
-main_training_function: main
-num_machines: 1
-num_processes: ${NPROC}
-rdzv_backend: static
-same_network: true
-use_cpu: false
-EOF
+  python -m xiconwam.engine.launch_config --task "${TASK}" --output "${OUT}" \
+    --processes "${NPROC}" --launcher-file "${ACCELERATE_CONFIG}" "$@"
 fi
 
-echo "task=${TASK} gpus=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} zero=${ZERO_SPEC} output=${OUT}"
+echo "task=${TASK} gpus=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} launcher_config=${ACCELERATE_CONFIG} output=${OUT}"
 set -o pipefail
 if [[ "${ACCELERATE_CONFIG}" == "none" ]]; then
   if [[ "${NPROC}" != "1" ]]; then

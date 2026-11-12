@@ -1,0 +1,14 @@
+defaults:
+  - video_dit: wan22
+  - _self_
+
+_target_: xiconwam.launch.build_model
+architecture: video
+training:
+  mode: video_only
+  freeze_video: false
+
+video_dit:
+  load_text_encoder: true
+  tokenizer_max_len: 512
+  use_gradient_checkpointing: true

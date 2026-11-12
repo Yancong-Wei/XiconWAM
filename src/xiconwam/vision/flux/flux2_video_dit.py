@@ -818,10 +818,13 @@ class Flux2VideoDiT(nn.Module):
         torch_dtype: torch.dtype = torch.bfloat16,
         attention_backend: str = "sdpa",
         skip_dit_load_from_pretrain: bool = False,
+        dit_config: dict | None = None,
     ) -> "Flux2VideoDiT":
 
         key = str(variant).lower().replace("_", "-")
-        if key in {"klein-base-4b", "flux.2-klein-base-4b", "4b", "base-4b"}:
+        if dit_config is not None:
+            params = Flux2Params(**dit_config)
+        elif key in {"klein-base-4b", "flux.2-klein-base-4b", "4b", "base-4b"}:
             params = Klein4BParams()
         elif key in {"klein-base-9b", "flux.2-klein-base-9b", "9b", "base-9b"}:
             params = Klein9BParams()

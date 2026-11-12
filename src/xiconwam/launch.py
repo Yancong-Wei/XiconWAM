@@ -7,6 +7,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from xiconwam.data.lerobot.resources import reuse_during_construction
+from xiconwam.model_config import as_dict as _as_dict
 from xiconwam.kit.logging_config import get_logger, setup_logging
 from xiconwam.kit.pytorch_utils import (
     mixed_precision_to_dtype as _mixed_precision_to_model_dtype,
@@ -14,12 +15,6 @@ from xiconwam.kit.pytorch_utils import (
 )
 
 logger = get_logger(__name__)
-
-
-def _as_dict(value):
-    if isinstance(value, DictConfig):
-        return OmegaConf.to_container(value, resolve=True)
-    return dict(value or {})
 
 
 def _lora_payload(lora, backbone):
@@ -76,6 +71,7 @@ def build_model(
     projector_hidden_dim: int = 64,
     action_dit_config=None,
     action_dit_pretrained_path: str | None = None,
+    action_dit_checkpoint: str | None = None,
     skip_dit_load_from_pretrain: bool = False,
     video_scheduler=None,
     action_scheduler=None,
@@ -92,18 +88,80 @@ def build_model(
     noise_beta_beta: float = 1.0,
     noise_s: float = 0.999,
     group_learning_rate=None,
+    learning_rate_scale=None,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
+    video_backbone=None,
+    action_backbone=None,
+    action_dit=None,
+    video_dit=None,
+    state_encoder_hidden_dim=None,
+    feature_layer=None,
+    training=None,
     **unused,
 ):
-    """Build mot, idm, or hide. The visual tower comes from `backbone`."""
-    del attention_backend, unused
+    """Build a joint policy or a standalone video model."""
+    del attention_backend
+    if unused:
+        raise TypeError(f"Unknown model configuration keys: {sorted(unused)}")
+    if state_encoder_hidden_dim is not None:
+        projector_hidden_dim = int(state_encoder_hidden_dim)
     name = str(architecture).strip().lower()
-    if name not in {"mot", "idm", "hide"}:
+    if name not in {"mot", "idm", "hide", "video"}:
         raise ValueError(
-            f"`architecture` must be mot, idm, or hide, got {architecture!r}."
+            f"`architecture` must be mot, idm, hide, or video, got {architecture!r}."
         )
-    backbone_cfg = _as_dict(backbone)
+    from xiconwam.model_config import (
+        resolve_action_config,
+        resolve_feature_layer,
+        validate_architecture,
+    )
+
+    video_specs = [
+        spec for spec in (video_dit, video_backbone, backbone) if spec is not None
+    ]
+    if len(video_specs) != 1:
+        raise ValueError(
+            "Specify exactly one video_dit (legacy: backbone/video_backbone)"
+        )
+    backbone_cfg = _as_dict(video_specs[0])
+    component_lora = backbone_cfg.pop("lora", None)
+    if lora is not None and component_lora is not None:
+        raise ValueError("Specify LoRA once, under model.video_dit.lora")
+    lora = component_lora if component_lora is not None else lora
+    paired_action = backbone_cfg.pop("action_dit", None)
+    if action_dit is not None:
+        paired_action = _as_dict(action_dit)
+    elif action_backbone is not None:
+        paired_action = _as_dict(action_backbone)
+    if name != "video" and paired_action is not None:
+        action_dit_config = resolve_action_config(backbone_cfg, paired_action)
+        validate_architecture(name, action_dit_config)
+        action_dit_checkpoint = paired_action.get("checkpoint")
+        action_dit_pretrained_path = paired_action.get("pretrained_path")
+        if paired_action.get("from_scratch", False):
+            action_dit_pretrained_path = None
+        action_scheduler = paired_action.get("scheduler")
+    video_scheduler = video_scheduler or backbone_cfg.get("video_scheduler")
+    training_cfg = _as_dict(training)
+    if name == "video":
+        from xiconwam.actor.video import VideoModel
+
+        if (
+            action_dit_checkpoint is not None
+            or _lora_payload(lora, backbone_cfg) is not None
+        ):
+            raise ValueError(
+                "Standalone video training requires full Video DiT weights"
+            )
+        model = VideoModel.from_backbone(
+            backbone_cfg,
+            device=device,
+            torch_dtype=model_dtype,
+            skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+        )
+        model.training_policy = training_cfg or {"mode": "video_only"}
+        return model
     action_cfg = _as_dict(action_dit_config) if action_dit_config is not None else None
     common = dict(
         backbone=backbone_cfg,
@@ -112,6 +170,7 @@ def build_model(
         projector_hidden_dim=projector_hidden_dim,
         action_dit_config=action_cfg,
         action_dit_pretrained_path=action_dit_pretrained_path,
+        action_dit_checkpoint=action_dit_checkpoint,
         skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
         video_scheduler=video_scheduler,
         action_scheduler=action_scheduler,
@@ -127,7 +186,11 @@ def build_model(
         if action_cfg is None:
             raise ValueError("hide requires `action_dit_config`.")
         if action_dim is None:
-            raise ValueError("hide requires `action_dim`.")
+            action_dim = action_cfg["action_dim"]
+        if int(action_dim) != int(action_cfg["action_dim"]):
+            raise ValueError("HIDE action_dim must match Action DiT action_dim")
+        if feature_layer is not None:
+            extract_layer = resolve_feature_layer(backbone_cfg, feature_layer)
         video_scheduler_cfg = _as_dict(video_scheduler)
         action_scheduler_cfg = _as_dict(action_scheduler)
         loss_cfg = _as_dict(loss)
@@ -135,6 +198,7 @@ def build_model(
             backbone=backbone_cfg,
             action_dit_config=action_cfg,
             action_dit_pretrained_path=action_dit_pretrained_path,
+            action_dit_checkpoint=action_dit_checkpoint,
             action_dim=int(action_dim),
             state_dim=int(state_dim),
             state_position=state_position,
@@ -150,6 +214,9 @@ def build_model(
             noise_s=float(noise_s),
             group_learning_rate=(
                 _as_dict(group_learning_rate) if group_learning_rate else None
+            ),
+            learning_rate_scale=(
+                _as_dict(learning_rate_scale) if learning_rate_scale else None
             ),
             skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
             device=device,
@@ -177,6 +244,7 @@ def build_model(
         from xiconwam.actor.mot import MoTPolicy
 
         model = _build_policy(MoTPolicy, **common)
+    model.training_policy = training_cfg
     return _apply_lora(model, _lora_payload(lora, backbone_cfg))
 
 
@@ -203,6 +271,7 @@ def _build_policy(policy_cls, **kwargs):
         projector_hidden_dim=int(kwargs.get("projector_hidden_dim", 64)),
         action_dit_config=_as_dict(kwargs["action_dit_config"]),
         action_dit_pretrained_path=kwargs.get("action_dit_pretrained_path"),
+        action_dit_checkpoint=kwargs.get("action_dit_checkpoint"),
         skip_dit_load_from_pretrain=bool(
             kwargs.get("skip_dit_load_from_pretrain", False)
         ),
@@ -220,203 +289,35 @@ def _build_policy(policy_cls, **kwargs):
     )
 
 
-def build_mot(
-    backbone=None,
-    attention_backend: str = "sdpa",
-    state_dim: int | None = None,
-    state_position: str = "context",
-    projector_hidden_dim: int = 64,
-    action_dit_config=None,
-    action_dit_pretrained_path: str | None = None,
-    skip_dit_load_from_pretrain: bool = False,
-    video_scheduler=None,
-    action_scheduler=None,
-    loss=None,
-    model_dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
-    **unused,
-):
-    """Action stream reads the full video stream while both are denoised."""
-    del attention_backend
-    from xiconwam.actor.mot import MoTPolicy
+def build_mot(**kwargs):
+    """Compatibility target for saved Hydra configs; prefer build_model."""
+    return _build_legacy_policy("mot", kwargs)
 
-    model = _build_policy(
-        MoTPolicy,
-        backbone=backbone,
-        state_dim=state_dim,
-        state_position=state_position,
-        projector_hidden_dim=projector_hidden_dim,
-        action_dit_config=action_dit_config,
-        action_dit_pretrained_path=action_dit_pretrained_path,
-        skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
-        video_scheduler=video_scheduler,
-        action_scheduler=action_scheduler,
-        loss=loss,
-        model_dtype=model_dtype,
-        device=device,
+
+def build_idm(**kwargs):
+    """Compatibility target for saved Hydra configs; prefer build_model."""
+    return _build_legacy_policy("idm", kwargs)
+
+
+def build_hide(**kwargs):
+    """Compatibility target for saved Hydra configs; prefer build_model."""
+    kwargs.setdefault(
+        "action_dim", _as_dict(kwargs.get("action_dit_config")).get("action_dim")
     )
-    return _apply_lora(model, unused.get("lora"))
+    return _build_legacy_policy("hide", kwargs)
 
 
-def build_idm(
-    video_cond_noise_prob: float = 0.5,
-    backbone=None,
-    attention_backend: str = "sdpa",
-    state_dim: int | None = None,
-    state_position: str = "context",
-    projector_hidden_dim: int = 64,
-    action_dit_config=None,
-    action_dit_pretrained_path: str | None = None,
-    skip_dit_load_from_pretrain: bool = False,
-    video_scheduler=None,
-    action_scheduler=None,
-    loss=None,
-    model_dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
-    **unused,
-):
-    """Teacher-forced inverse dynamics: predict the action from the video future."""
-    del attention_backend
-    from xiconwam.actor.idm import IDMPolicy
-
-    model = _build_policy(
-        IDMPolicy,
-        backbone=backbone,
-        state_dim=state_dim,
-        state_position=state_position,
-        projector_hidden_dim=projector_hidden_dim,
-        action_dit_config=action_dit_config,
-        action_dit_pretrained_path=action_dit_pretrained_path,
-        skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
-        video_scheduler=video_scheduler,
-        action_scheduler=action_scheduler,
-        loss=loss,
-        model_dtype=model_dtype,
-        device=device,
-        video_cond_noise_prob=video_cond_noise_prob,
-    )
-    return _apply_lora(model, unused.get("lora"))
+def _build_legacy_policy(architecture, kwargs):
+    # Historical targets take PEFT kwargs directly; build_model uses enable/rank.
+    lora = kwargs.pop("lora", None)
+    return _apply_lora(build_model(architecture=architecture, **kwargs), lora)
 
 
-def build_hide(
-    backbone=None,
-    attention_backend: str = "sdpa",
-    state_dim: int | None = None,
-    state_position: str = "context",
-    projector_hidden_dim: int = 64,
-    action_dit_config=None,
-    action_dit_pretrained_path: str | None = None,
-    skip_dit_load_from_pretrain: bool = False,
-    video_hidden_layer: int = 17,
-    feature_timestep: float = 1.0,
-    repeated_diffusion_steps: int = 1,
-    action_inference_steps: int = 4,
-    noise_beta_alpha: float = 1.5,
-    noise_beta_beta: float = 1.0,
-    noise_s: float = 0.999,
-    group_learning_rate=None,
-    video_scheduler=None,
-    action_scheduler=None,
-    loss=None,
-    lora=None,
-    model_dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
-    **unused,
-):
-    """Video DiT hidden states condition a separate action DiT."""
-    del attention_backend, unused
-    from xiconwam.actor.hide import HidePolicy
-
-    if backbone is None or state_dim is None or action_dit_config is None:
-        raise ValueError(
-            "`backbone`, `state_dim`, and `action_dit_config` are required."
-        )
-    action_cfg = _as_dict(action_dit_config)
-    video_scheduler = _as_dict(video_scheduler)
-    action_scheduler = _as_dict(action_scheduler)
-    loss = _as_dict(loss)
-    model = HidePolicy.from_backbone_pretrained(
-        backbone=_as_dict(backbone),
-        action_dit_config=action_cfg,
-        action_dit_pretrained_path=action_dit_pretrained_path,
-        action_dim=int(action_cfg["action_dim"]),
-        state_dim=int(state_dim),
-        state_position=state_position,
-        projector_hidden_dim=int(projector_hidden_dim),
-        video_hidden_layer=int(video_hidden_layer),
-        feature_timestep=float(feature_timestep),
-        repeated_diffusion_steps=int(repeated_diffusion_steps),
-        action_inference_steps=int(action_inference_steps),
-        noise_beta_alpha=float(noise_beta_alpha),
-        noise_beta_beta=float(noise_beta_beta),
-        noise_s=float(noise_s),
-        group_learning_rate=(
-            _as_dict(group_learning_rate) if group_learning_rate else None
-        ),
-        skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
-        device=device,
-        torch_dtype=model_dtype,
-        video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
-        video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
-        video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
-        action_train_shift=float(action_scheduler.get("train_shift", 5.0)),
-        action_infer_shift=float(action_scheduler.get("infer_shift", 5.0)),
-        action_num_train_timesteps=int(
-            action_scheduler.get("num_train_timesteps", 1000)
-        ),
-        loss_lambda_video=float(loss.get("lambda_video", 1.0)),
-        loss_lambda_action=float(loss.get("lambda_action", 1.0)),
-    )
-    return _apply_lora(model, lora)
-
-
-def build_actor(
-    backbone=None,
-    attention_backend: str = "sdpa",
-    state_dim: int | None = None,
-    state_position: str = "context",
-    projector_hidden_dim: int = 64,
-    action_dit_config=None,
-    action_dit_pretrained_path: str | None = None,
-    skip_dit_load_from_pretrain: bool = False,
-    video_scheduler=None,
-    action_scheduler=None,
-    loss=None,
-    model_dtype: torch.dtype = torch.bfloat16,
-    device: str = "cuda",
-):
-    """Build the dual-stream world-action actor from a Wan2.2 tower."""
-    del attention_backend
+def build_actor(**kwargs):
+    """Compatibility target preserving the original actor checkpoint variant."""
     from xiconwam.actor.world import XiconActor
 
-    if backbone is None:
-        raise ValueError("`backbone` configuration is required.")
-    if action_dit_config is None:
-        raise ValueError("`action_dit_config` is required.")
-    video_scheduler = _as_dict(video_scheduler)
-    action_scheduler = _as_dict(action_scheduler)
-    loss = _as_dict(loss)
-    return XiconActor.from_backbone_pretrained(
-        backbone=_as_dict(backbone),
-        device=device,
-        torch_dtype=model_dtype,
-        state_dim=state_dim,
-        state_position=state_position,
-        projector_hidden_dim=projector_hidden_dim,
-        action_dit_config=_as_dict(action_dit_config),
-        action_dit_pretrained_path=action_dit_pretrained_path,
-        skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
-        video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
-        video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
-        video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
-        action_train_shift=float(action_scheduler.get("train_shift", 5.0)),
-        action_infer_shift=float(action_scheduler.get("infer_shift", 5.0)),
-        action_num_train_timesteps=int(
-            action_scheduler.get("num_train_timesteps", 1000)
-        ),
-        loss_lambda_video=float(loss.get("lambda_video", 1.0)),
-        loss_lambda_action=float(loss.get("lambda_action", 1.0)),
-    )
+    return _build_policy(XiconActor, **kwargs)
 
 
 def validation_dataset_config(data_cfg: DictConfig) -> DictConfig:
@@ -466,6 +367,8 @@ def build_datasets(data_cfg: DictConfig):
             train_ds.norm_stats_path,
             force_add=True,
         )
+    if getattr(train_ds, "is_video_manifest", False):
+        return train_ds, instantiate(data_cfg.get("val"))
     val_cfg = validation_dataset_config(data_cfg)
     train_stats_path = data_cfg.train.get("pretrained_norm_stats")
     default_stats_path = os.path.join(misc.get_work_dir(), "dataset_stats.json")
@@ -501,6 +404,15 @@ def run_training(cfg: DictConfig):
     from xiconwam.engine.session import TrainSession
     from xiconwam.kit import misc
 
+    from hydra.core.hydra_config import HydraConfig
+    from xiconwam.engine.configuration import (
+        resolve_training_config,
+        validate_training_config,
+    )
+
+    overrides = HydraConfig.get().overrides.task if HydraConfig.initialized() else []
+    cfg = resolve_training_config(cfg, overrides)
+    validate_training_config(cfg)
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
     accelerator = Accelerator(
         gradient_accumulation_steps=int(cfg.gradient_accumulation_steps),
@@ -544,78 +456,3 @@ def run_training(cfg: DictConfig):
         trainer.train()
     finally:
         accelerator.end_training()
-
-
-def run_inference(cfg: DictConfig):
-    import numpy as np
-    from einops import repeat
-    from PIL import Image
-
-    from xiconwam.actor.helpers.inference import (
-        configure_inference_compile_from_config,
-        configure_model_execution,
-    )
-    from xiconwam.kit.video_io import save_mp4
-
-    setup_logging(log_level=logging.INFO)
-    inference_cfg = cfg.inference
-    mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
-    model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
-    model = instantiate(
-        cfg.model, model_dtype=model_dtype, device=str(inference_cfg.device)
-    )
-    model = configure_model_execution(
-        model,
-        vae_micro_batch_size=cfg.get("vae_micro_batch_size", 1),
-        inference_cross_kv_reuse=cfg.get("inference_cross_kv_reuse", True),
-    )
-    checkpoint_path = inference_cfg.get("checkpoint_path")
-    if checkpoint_path:
-        ckpt = Path(checkpoint_path)
-        if ckpt.exists():
-            logger.info("Loading finetuned checkpoint: %s", checkpoint_path)
-            model.load_checkpoint(checkpoint_path)
-        else:
-            logger.warning("Checkpoint not found, skipping load: %s", checkpoint_path)
-    model.eval()
-    model = configure_inference_compile_from_config(model, inference_cfg)
-
-    def center_crop_resize(img: Image, width: int, height: int) -> Image.Image:
-        src_w, src_h = img.size
-        scale = max(width / src_w, height / src_h)
-        resized = img.resize(
-            (round(src_w * scale), round(src_h * scale)), resample=Image.BILINEAR
-        )
-        rw, rh = resized.size
-        left = max((rw - width) // 2, 0)
-        top = max((rh - height) // 2, 0)
-        return resized.crop((left, top, left + width, top + height))
-
-    input_image = Image.open(str(inference_cfg.input_image_path)).convert("RGB")
-    input_image = center_crop_resize(
-        input_image, width=inference_cfg.width, height=inference_cfg.height
-    )
-    arr = np.array(input_image, dtype=np.float32)
-    pixels = torch.from_numpy(arr).to(device=model.device, dtype=model.torch_dtype)
-    pixels = pixels * (2.0 / 255.0) - 1.0
-    pixels = repeat(pixels, "H W C -> B C H W", B=1)
-    output_mp4 = str(inference_cfg.output_mp4)
-    infer_out = model.infer(
-        prompt=str(inference_cfg.prompt),
-        negative_prompt=str(inference_cfg.negative_prompt),
-        text_cfg_scale=float(inference_cfg.text_cfg_scale),
-        action_cfg_scale=float(inference_cfg.action_cfg_scale),
-        input_image=pixels,
-        num_frames=int(inference_cfg.num_frames),
-        num_inference_steps=int(inference_cfg.num_inference_steps),
-        sigma_shift=(
-            None
-            if inference_cfg.get("sigma_shift") is None
-            else float(inference_cfg.sigma_shift)
-        ),
-        seed=int(inference_cfg.seed),
-        rand_device=str(inference_cfg.rand_device),
-    )
-    save_mp4(infer_out["video"], output_mp4, fps=15)
-    logger.info("Saved inference video to %s", output_mp4)
-    return output_mp4

@@ -27,6 +27,11 @@ from accelerate import PartialState
 logger = get_logger(__name__)
 
 
+def configured_window_steps(config) -> int:
+    """Raw control ticks, with support for saved configs using num_frames."""
+    return int(config.get("window_steps", config.get("num_frames", 33)))
+
+
 def trained_window(num_frames: int, action_video_freq_ratio: int) -> tuple[int, int]:
     """Video frames and action steps one training window teaches the policy.
 
@@ -87,7 +92,15 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
         unify_action_map=None,
         unify_state_map=None,
         norm_stats_output=None,
+        window_steps=None,
+        video_dit=None,
     ):
+        if window_steps is not None:
+            num_frames = int(window_steps)
+        if video_dit is not None:
+            if backbone is not None:
+                raise ValueError("Specify dataset video_dit once (legacy: backbone)")
+            backbone = video_dit
         del unify_action_map, unify_state_map
         _, action_steps = trained_window(num_frames, action_video_freq_ratio)
         self.video_sample_indices = tuple(
@@ -470,7 +483,7 @@ class EpisodeWindowDataset(torch.utils.data.Dataset):
         if self.backbone is None:
             raise ValueError(
                 "Online text encoding requires `backbone` on the dataset "
-                "(pass model.backbone) when load_text_encoder_on_miss=true."
+                "(pass model.video_dit) when load_text_encoder_on_miss=true."
             )
         from xiconwam.vision.registry import load_text_encoder
 

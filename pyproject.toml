@@ -5,12 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "xiconwam"
 version = "0.1.0"
-description = "XiconWAM dual-stream world-action policies for RoboDojo"
+description = "XiconWAM dual-stream world-action policies"
 requires-python = ">=3.10"
 dependencies = [
   "accelerate==1.5.2",
   "av==16.0.1",
-  "boto3==1.35.99",
   "datasets==3.6.0",
   "deepspeed==0.16.9",
   "einops==0.8.1",
@@ -37,11 +36,10 @@ dependencies = [
   "regex==2025.11.3",
   "rich==14.2.0",
   "safetensors==0.5.3",
-  "termcolor==2.5.0",
   "torch==2.7.1+cu128",
   "torchvision==0.22.1+cu128",
   "tqdm==4.66.5",
-  "transformers==4.57.0",
+  "transformers==4.57.1",
   "typing-extensions==4.15.0",
   "wandb==0.23.1",
   "websockets>=14.0",
@@ -77,3 +75,6 @@ torchvision = { index = "pytorch-cu128" }
 # Engine is distributed as a separately reviewed wheel, not from this registry.
 # Install that wheel after uv sync; pip extras above retain the version contract.
 exclude-dependencies = ["xicon-engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

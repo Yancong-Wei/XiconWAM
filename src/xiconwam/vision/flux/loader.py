@@ -6,7 +6,7 @@ import torch
 
 from ..contract import BackboneComponents, TextEncoderComponents, TextEncoding
 from ..protocol import BLOCK_PROTOCOL_STAGED
-from .action_initialization import initialize_from_flux as initialize_action
+from .action_initialization import initialize_from_flux as initialize_action  # noqa: F401 - backend API
 from .flux2_video_dit import Flux2VideoDiT
 from .flux2_video_text_encoder import Flux2Qwen3TextEncoder
 from .flux2_video_vae import Flux2VideoVAE
@@ -26,6 +26,7 @@ def load_flux2_components(
     attention_backend: str,
     skip_dit_load_from_pretrain: bool,
     use_gradient_checkpointing: bool = False,
+    dit_config: dict | None = None,
 ) -> BackboneComponents:
     dit = Flux2VideoDiT.from_pretrained(
         model_path=model_path,
@@ -34,6 +35,7 @@ def load_flux2_components(
         torch_dtype=torch_dtype,
         attention_backend=attention_backend,
         skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+        dit_config=dit_config,
     )
 
     dit.use_gradient_checkpointing = bool(use_gradient_checkpointing)
@@ -45,7 +47,11 @@ def load_flux2_components(
     )
 
     text_encoder = None
-    text_dim = 7680 if "4b" in str(variant).lower() else 12288
+    text_dim = (
+        int(dit_config["context_in_dim"])
+        if dit_config is not None
+        else (7680 if "4b" in str(variant).lower() else 12288)
+    )
     if load_text_encoder:
         text_encoder = Flux2Qwen3TextEncoder.from_pretrained(
             qwen3_model_spec,
@@ -53,7 +59,10 @@ def load_flux2_components(
             output_layers=qwen3_output_layers,
             max_length=tokenizer_max_len,
         ).to(device)
-        text_dim = int(text_encoder.dim)
+        if int(text_encoder.dim) != text_dim:
+            raise ValueError(
+                "Flux text encoder width must match dit_config.context_in_dim"
+            )
 
     return BackboneComponents(
         name="flux2",
@@ -100,6 +109,9 @@ def load_components(cfg, *, device, torch_dtype, skip_dit_load_from_pretrain=Fal
         attention_backend=str(cfg.get("attention_backend", "sdpa")),
         skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
         use_gradient_checkpointing=bool(cfg.get("use_gradient_checkpointing", False)),
+        dit_config=dict(cfg["dit_config"])
+        if cfg.get("dit_config") is not None
+        else None,
     )
 
 
@@ -111,6 +123,9 @@ def load_dit(cfg, *, device, torch_dtype, skip_dit_load_from_pretrain=False):
         torch_dtype=torch_dtype,
         attention_backend=str(cfg.get("attention_backend", "sdpa")),
         skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+        dit_config=dict(cfg["dit_config"])
+        if cfg.get("dit_config") is not None
+        else None,
     )
     model.use_gradient_checkpointing = bool(
         cfg.get("use_gradient_checkpointing", False)

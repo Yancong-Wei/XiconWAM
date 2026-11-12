@@ -163,6 +163,7 @@ class XiconActor(ObjectiveMixin, RolloutMixin, torch.nn.Module):
         projector_hidden_dim: int = 64,
         action_dit_config: dict[str, Any],
         action_dit_pretrained_path: str | None = None,
+        action_dit_checkpoint: str | None = None,
         skip_dit_load_from_pretrain: bool = False,
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
@@ -206,7 +207,9 @@ class XiconActor(ObjectiveMixin, RolloutMixin, torch.nn.Module):
         action_expert = action_expert_cls.from_pretrained(
             action_dit_config=action_dit_config,
             action_dit_pretrained_path=action_dit_pretrained_path,
-            skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+            skip_dit_load_from_pretrain=(
+                skip_dit_load_from_pretrain or action_dit_checkpoint is not None
+            ),
             device=device,
             torch_dtype=torch_dtype,
         )
@@ -258,8 +261,14 @@ class XiconActor(ObjectiveMixin, RolloutMixin, torch.nn.Module):
             "vae": components.vae_path,
             "text_encoder": components.text_encoder_path,
             "tokenizer": components.tokenizer_path,
-            "action_dit_backbone": action_dit_pretrained_path,
+            "action_dit_backbone": (
+                action_dit_checkpoint
+                if action_dit_checkpoint is not None
+                else action_dit_pretrained_path
+            ),
         }
+        if action_dit_checkpoint is not None:
+            model.load_action_checkpoint(action_dit_checkpoint)
         return model
 
     def to(self, *args, **kwargs):
@@ -390,6 +399,26 @@ class XiconActor(ObjectiveMixin, RolloutMixin, torch.nn.Module):
     def forward(self, sample):
         return self.training_loss(sample)
 
+    def save_video_checkpoint(self, path, *, step=None):
+        from xiconwam.actor.dit_checkpoint import save_video_weights
+
+        save_video_weights(self.video_expert, path, step=step)
+
+    def load_video_checkpoint(self, path):
+        from xiconwam.actor.dit_checkpoint import load_video_weights
+
+        load_video_weights(self.video_expert, path)
+
+    def save_action_checkpoint(self, path, *, step=None):
+        from xiconwam.actor.dit_checkpoint import save_action_weights
+
+        save_action_weights(self, path, step=step)
+
+    def load_action_checkpoint(self, path):
+        from xiconwam.actor.dit_checkpoint import load_action_weights
+
+        return load_action_weights(self, path)
+
     def save_checkpoint(self, path, optimizer=None, step=None):
         from xiconwam.actor.lora import build_lora_checkpoint_payload, has_lora
 
@@ -422,16 +451,22 @@ class XiconActor(ObjectiveMixin, RolloutMixin, torch.nn.Module):
         from xiconwam.actor.lora import (
             is_lora_checkpoint,
             load_lora_model_checkpoint_state,
+            load_standard_state_dict,
         )
 
-        payload = torch.load(path, map_location="cpu", mmap=True)
-        if is_lora_checkpoint(payload):
-            load_lora_model_checkpoint_state(
-                self, payload, merge_after_load=bool(merge_lora)
+        from xiconwam.actor.dit_checkpoint import ACTION_FORMAT, VIDEO_FORMAT
+
+        if str(path).endswith(".safetensors"):
+            raise ValueError(
+                "Video-only weights require load_video_checkpoint(), not load_checkpoint()"
             )
-            if optimizer is not None and "optimizer" in payload:
-                optimizer.load_state_dict(payload["optimizer"])
-            return payload
+        payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        if payload.get("format") == ACTION_FORMAT:
+            return self.load_action_checkpoint(path)
+        if payload.get("format") == VIDEO_FORMAT:
+            raise ValueError(
+                "Video-only weights require load_video_checkpoint(), not load_checkpoint()"
+            )
         validate_checkpoint_state_position(payload, self.state_position)
         validate_policy_action_config(self, payload)
         if endpoint.enabled(self):
@@ -451,27 +486,22 @@ class XiconActor(ObjectiveMixin, RolloutMixin, torch.nn.Module):
                 f"Checkpoint variant {checkpoint_variant!r} does not match "
                 f"{self.model_variant!r}."
             )
-        weights = payload.get("streams")
-        if weights is None and "dit" in payload:
-            logger.warning("Loading a video-only checkpoint into the video expert.")
-            self.video_expert.load_state_dict(payload["dit"], strict=False)
-        elif weights is None:
-            raise ValueError(f"Checkpoint missing stream weights: {path}")
-        else:
-            self.streams.load_state_dict(weights, strict=False)
-        if self.state_encoder is not None:
-            if "state_encoder" in payload:
-                self.state_encoder.load_state_dict(
-                    payload["state_encoder"], strict=True
-                )
-            else:
-                logger.warning(
-                    "Checkpoint has no state encoder weights; keeping the current parameters."
-                )
-        elif "state_encoder" in payload:
-            logger.warning(
-                "Checkpoint contains state encoder weights, but this actor has no state encoder."
+        if is_lora_checkpoint(payload):
+            load_lora_model_checkpoint_state(
+                self, payload, merge_after_load=bool(merge_lora)
             )
+            if optimizer is not None and "optimizer" in payload:
+                optimizer.load_state_dict(payload["optimizer"])
+            return payload
+        weights = payload.get("streams")
+        if weights is None:
+            raise ValueError(f"Checkpoint missing stream weights: {path}")
+        encoder_state = payload.get("state_encoder")
+        if (encoder_state is None) != (self.state_encoder is None):
+            raise ValueError("Checkpoint and policy disagree about the state encoder")
+        load_standard_state_dict(self.streams, weights, strict=True)
+        if self.state_encoder is not None:
+            self.state_encoder.load_state_dict(encoder_state, strict=True)
         if optimizer is not None and "optimizer" in payload:
             optimizer.load_state_dict(payload["optimizer"])
         return payload

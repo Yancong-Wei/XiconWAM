@@ -26,12 +26,15 @@ class Cosmos25TextEncoder(nn.Module):
 
     @property
     def output_dim(self) -> int:
-        return 1024 if self._projector is not None else self.raw_output_dim
+        return (
+            self._projected_dim if self._projector is not None else self.raw_output_dim
+        )
 
     def set_projector(
-        self, projector: Callable[[torch.Tensor], torch.Tensor]
+        self, projector: Callable[[torch.Tensor], torch.Tensor], output_dim: int = 1024
     ) -> "Cosmos25TextEncoder":
         self._projector = projector
+        self._projected_dim = int(output_dim)
         return self
 
     @classmethod
@@ -44,7 +47,9 @@ class Cosmos25TextEncoder(nn.Module):
         from transformers import AutoTokenizer, Qwen2_5_VLForConditionalGeneration
 
         model_path = str(Path(model_path))
-        tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True, trust_remote_code=False)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, local_files_only=True, trust_remote_code=False
+        )
         tokenizer.padding_side = "right"
         tokenizer.truncation_side = "right"
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -92,10 +97,14 @@ class Cosmos25TextEncoder(nn.Module):
     ):
         prompts = [prompt] if isinstance(prompt, str) else list(prompt)
         if not prompts or not all(isinstance(value, str) for value in prompts):
-            raise TypeError("prompt must be a string or a non-empty sequence of strings.")
+            raise TypeError(
+                "prompt must be a string or a non-empty sequence of strings."
+            )
         encoded = [self._tokenize(value) for value in prompts]
         input_ids = torch.cat([value["input_ids"] for value in encoded], dim=0)
-        attention_mask = torch.cat([value["attention_mask"] for value in encoded], dim=0)
+        attention_mask = torch.cat(
+            [value["attention_mask"] for value in encoded], dim=0
+        )
         device = next(self.model.parameters()).device
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
@@ -108,7 +117,9 @@ class Cosmos25TextEncoder(nn.Module):
         )
         hidden_states = outputs.hidden_states
         if hidden_states is None or len(hidden_states) < 2:
-            raise RuntimeError("Cosmos-Reason1 did not return transformer hidden states.")
+            raise RuntimeError(
+                "Cosmos-Reason1 did not return transformer hidden states."
+            )
         transformer_states = hidden_states[1:]
         if len(transformer_states) != self.num_hidden_layers:
             raise RuntimeError(

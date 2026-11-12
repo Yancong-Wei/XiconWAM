@@ -9,7 +9,7 @@ import torch
 
 from xiconwam.kit.logging_config import get_logger
 from ..contract import BackboneComponents, TextEncoderComponents, TextEncoding
-from .action_initialization import initialize_action
+from .action_initialization import initialize_action as initialize_action
 from .cosmos_video_dit import Cosmos25DiTConfig, Cosmos25VideoDiT
 from .cosmos_video_text_encoder import Cosmos25TextEncoder
 
@@ -69,16 +69,24 @@ def load_cosmos25_text_projection(
     checkpoint_path: str | Path,
     device: str | torch.device = "cpu",
     torch_dtype: torch.dtype = torch.bfloat16,
+    context_dim: int = 1024,
 ) -> torch.nn.Module:
-    state = _clean_dit_state_dict(_read_torch_checkpoint(Path(checkpoint_path)))
+    path = Path(checkpoint_path)
+    if path.suffix == ".safetensors":
+        from xiconwam.actor.dit_checkpoint import video_state
+
+        state, _ = video_state(path)
+    else:
+        payload = _read_torch_checkpoint(path)
+        state = payload["dit"] if "dit" in payload else _clean_dit_state_dict(payload)
     weight = state["crossattn_proj.0.weight"]
     bias = state["crossattn_proj.0.bias"]
-    if tuple(weight.shape) != (1024, ORIGINAL_REASON_CONTEXT_DIM):
+    if tuple(weight.shape) != (context_dim, ORIGINAL_REASON_CONTEXT_DIM):
         raise RuntimeError(
-            "Unexpected Cosmos text projection shape: " f"{tuple(weight.shape)}."
+            f"Unexpected Cosmos text projection shape: {tuple(weight.shape)}."
         )
     with torch.device("meta"):
-        linear = torch.nn.Linear(ORIGINAL_REASON_CONTEXT_DIM, 1024, bias=True)
+        linear = torch.nn.Linear(ORIGINAL_REASON_CONTEXT_DIM, context_dim, bias=True)
     linear.load_state_dict({"weight": weight, "bias": bias}, strict=True, assign=True)
     projection = torch.nn.Sequential(linear, torch.nn.GELU())
     return projection.eval().requires_grad_(False).to(device=device, dtype=torch_dtype)
@@ -92,6 +100,7 @@ def load_cosmos25_dit(
     use_gradient_checkpointing: bool = False,
     video_attention_mask_mode: str = "bidirectional",
     conditional_frame_timestep: float = 0.0001,
+    dit_config: dict | None = None,
 ) -> Cosmos25VideoDiT:
     path = Path(checkpoint_path)
     raw = _read_torch_checkpoint(path)
@@ -99,6 +108,7 @@ def load_cosmos25_dit(
         raise TypeError(f"Expected a state dict in {path}, got {type(raw)}.")
     state = _clean_dit_state_dict(raw)
     config = Cosmos25DiTConfig(
+        **(dit_config or {}),
         attention_backend=attention_backend,
         use_gradient_checkpointing=use_gradient_checkpointing,
         video_attention_mask_mode=video_attention_mask_mode,
@@ -122,6 +132,7 @@ def load_cosmos25_components(
     use_gradient_checkpointing: bool = False,
     video_attention_mask_mode: str = "bidirectional",
     conditional_frame_timestep: float = 0.0001,
+    dit_config: dict | None = None,
     skip_dit_load_from_pretrain: bool = False,
 ) -> Cosmos25Components:
     from .cosmos_video_vae import CosmosVideoVAE
@@ -129,7 +140,6 @@ def load_cosmos25_components(
     logger.info("Loading Cosmos-Predict2.5-2B components...")
     start = time.time()
     root = Path(model_id)
-    dit_path = resolve_cosmos25_dit_path(root)
     vae_path = root / "tokenizer.pth"
     if not vae_path.is_file():
         raise FileNotFoundError(
@@ -138,10 +148,11 @@ def load_cosmos25_components(
     if skip_dit_load_from_pretrain:
         logger.info(
             "Skipping pretrained video DiT load (`skip_dit_load_from_pretrain=True`); "
-            "initializing video expert randomly and expecting checkpoint override."
+            "initializing video expert randomly or restoring full training state."
         )
         dit = Cosmos25VideoDiT(
             Cosmos25DiTConfig(
+                **(dit_config or {}),
                 attention_backend=attention_backend,
                 use_gradient_checkpointing=use_gradient_checkpointing,
                 video_attention_mask_mode=video_attention_mask_mode,
@@ -150,6 +161,7 @@ def load_cosmos25_components(
         ).to(device=device, dtype=torch_dtype)
         resolved_dit_path = "SKIPPED_PRETRAIN"
     else:
+        dit_path = resolve_cosmos25_dit_path(root)
         logger.info("Loading pretrained Cosmos video DiT from %s", dit_path)
         dit = load_cosmos25_dit(
             dit_path,
@@ -159,6 +171,7 @@ def load_cosmos25_components(
             use_gradient_checkpointing=use_gradient_checkpointing,
             video_attention_mask_mode=video_attention_mask_mode,
             conditional_frame_timestep=float(conditional_frame_timestep),
+            dit_config=dit_config,
         )
         resolved_dit_path = str(dit_path)
         logger.info("Finished loading pretrained Cosmos video DiT.")
@@ -172,7 +185,7 @@ def load_cosmos25_components(
         text_encoder = Cosmos25TextEncoder.from_pretrained(
             reason_path, torch_dtype=torch_dtype, max_length=tokenizer_max_len
         ).to(device)
-        text_encoder.set_projector(dit.project_text_context)
+        text_encoder.set_projector(dit.project_text_context, output_dim=dit.context_dim)
         logger.info("Finished loading Cosmos-Reason1 text encoder/tokenizer.")
     else:
         logger.info(
@@ -212,6 +225,7 @@ def _dit_options(cfg):
         conditional_frame_timestep=float(
             cfg.get("video_scheduler", {}).get("conditional_frame_timestep", 0.0001)
         ),
+        dit_config=dict(cfg.get("dit_config", {})),
     )
 
 
@@ -233,7 +247,9 @@ def load_components(cfg, *, device, torch_dtype, skip_dit_load_from_pretrain=Fal
 
 def load_dit(cfg, *, device, torch_dtype, skip_dit_load_from_pretrain=False):
     if skip_dit_load_from_pretrain:
-        return Cosmos25VideoDiT(Cosmos25DiTConfig(**_dit_options(cfg))).to(
+        options = _dit_options(cfg)
+        structure = options.pop("dit_config")
+        return Cosmos25VideoDiT(Cosmos25DiTConfig(**structure, **options)).to(
             device=device, dtype=torch_dtype
         )
     return load_cosmos25_dit(
@@ -259,7 +275,9 @@ def load_text_encoder(cfg, *, device, torch_dtype, context_len):
             resolve_cosmos25_dit_path(cfg["model_id"]),
             device=device,
             torch_dtype=torch_dtype,
-        )
+            context_dim=int(cfg.get("text_dim", 1024)),
+        ),
+        output_dim=int(cfg.get("text_dim", 1024)),
     )
 
     def encode(prompts):

@@ -9,9 +9,8 @@ train:
   _target_: xiconwam.data.mixture.build_mixture_dataset
   _recursive_: false
   weight_strategy: proportional
-  seed: 42
+  seed: ${seed}
   sources:
     robodojo:
       enabled: true
-      weight: 1.0
       config: ${data.sources.robodojo.train}

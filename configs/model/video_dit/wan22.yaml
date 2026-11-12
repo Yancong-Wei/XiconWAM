@@ -1,0 +1,58 @@
+name: wan22
+from_scratch: false
+model_id: ./playground/pretrained_models/Wan2.2-TI2V-5B
+tokenizer_max_len: 128
+load_text_encoder: false
+text_encoder_id: wan22ti2v5b
+text_dim: ${.dit_config.text_dim}
+attention_backend: auto
+use_gradient_checkpointing: false
+num_layers: ${.dit_config.num_layers}
+num_heads: ${.dit_config.num_heads}
+attn_head_dim: ${.dit_config.attn_head_dim}
+hidden_dim: ${.dit_config.hidden_dim}
+freq_dim: ${.dit_config.freq_dim}
+
+dit_config:
+  has_image_input: false
+  patch_size: [1, 2, 2]
+  in_dim: 48
+  hidden_dim: 3072
+  ffn_dim: 14336
+  freq_dim: 256
+  text_dim: 4096
+  out_dim: 48
+  num_heads: 24
+  attn_head_dim: 128
+  num_layers: 30
+  eps: 1.0e-06
+  seperated_timestep: true
+  fuse_vae_embedding_in_latents: true
+  # Options: first_frame_causal, per_frame_causal, bidirectional. Keep first_frame_causal by default.
+  video_attention_mask_mode: first_frame_causal
+  attention_backend: ${..attention_backend}
+  use_gradient_checkpointing: ${..use_gradient_checkpointing}
+
+video_scheduler:
+  family: continuous_flow
+  train_shift: 5.0
+  infer_shift: 5.0
+  num_train_timesteps: 1000
+lora_target_modules:
+  - self_attn.q
+  - self_attn.k
+  - self_attn.v
+  - self_attn.o
+  - cross_attn.q
+  - cross_attn.k
+  - cross_attn.v
+  - cross_attn.o
+  - ffn.0
+  - ffn.2
+
+# Adapter settings belong to the video component; frozen encoders are not adapted.
+lora:
+  enable: false
+  target: video
+  rank: 16
+  alpha: 32

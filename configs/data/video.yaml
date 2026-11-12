@@ -1,0 +1,7 @@
+train:
+  _target_: xiconwam.data.video_manifest.VideoManifestDataset
+  manifest: ???
+  frames: 17
+  height: 256
+  width: 416
+val: null

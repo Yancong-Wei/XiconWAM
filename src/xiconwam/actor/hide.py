@@ -39,7 +39,6 @@ logger = get_logger(__name__)
 
 
 class HidePolicy(nn.Module):
-
     _forward_endpoint = endpoint.predict
     _forward_endpoint_cached_action = endpoint._cached_action
 
@@ -66,6 +65,7 @@ class HidePolicy(nn.Module):
         noise_beta_beta: float = 1.0,
         noise_s: float = 0.999,
         group_learning_rate: Optional[dict] = None,
+        learning_rate_scale: Optional[dict] = None,
         device: str = "cpu",
         torch_dtype: torch.dtype = torch.float32,
         video_train_shift: float = 5.0,
@@ -115,6 +115,11 @@ class HidePolicy(nn.Module):
         self.noise_beta_beta = float(noise_beta_beta)
         self.noise_s = float(noise_s)
         self.group_learning_rate = dict(group_learning_rate or {})
+        self.learning_rate_scale = dict(learning_rate_scale or {})
+        if self.group_learning_rate and self.learning_rate_scale:
+            raise ValueError(
+                "Specify learning_rate_scale or legacy group_learning_rate"
+            )
         self.vae = vae
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
@@ -169,6 +174,18 @@ class HidePolicy(nn.Module):
     @property
     def action_dit(self):
         return self.dit["action_dit"]
+
+    @property
+    def action_expert(self):
+        return self.action_dit
+
+    @property
+    def state_encoder(self):
+        return self.dit["state_encoder"]
+
+    @property
+    def video_context_projector(self):
+        return self.dit["video_context_projector"]
 
     @staticmethod
     def _build_video_token_mask(
@@ -428,6 +445,7 @@ class HidePolicy(nn.Module):
         *,
         action_dit_config: dict[str, Any],
         action_dit_pretrained_path: str | None = None,
+        action_dit_checkpoint: str | None = None,
         action_dim: int = 48,
         state_dim: int = 48,
         state_position: str = "context",
@@ -440,6 +458,7 @@ class HidePolicy(nn.Module):
         noise_beta_beta: float = 1.0,
         noise_s: float = 0.999,
         group_learning_rate: dict | None = None,
+        learning_rate_scale: dict | None = None,
         skip_dit_load_from_pretrain: bool = False,
         device: str = "cuda",
         torch_dtype: torch.dtype = torch.bfloat16,
@@ -476,7 +495,8 @@ class HidePolicy(nn.Module):
         action_dit = ActionExpert.from_pretrained(
             action_dit_config=action_cfg,
             action_dit_pretrained_path=action_dit_pretrained_path,
-            skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
+            skip_dit_load_from_pretrain=skip_dit_load_from_pretrain
+            or action_dit_checkpoint is not None,
             device=device,
             torch_dtype=torch_dtype,
         )
@@ -498,6 +518,7 @@ class HidePolicy(nn.Module):
             noise_beta_beta=float(noise_beta_beta),
             noise_s=float(noise_s),
             group_learning_rate=group_learning_rate,
+            learning_rate_scale=learning_rate_scale,
             device=device,
             torch_dtype=torch_dtype,
             video_train_shift=video_train_shift,
@@ -530,6 +551,8 @@ class HidePolicy(nn.Module):
             "tokenizer": components.tokenizer_path,
             "action_dit_backbone": action_dit_pretrained_path,
         }
+        if action_dit_checkpoint is not None:
+            model.load_action_checkpoint(action_dit_checkpoint)
         return model
 
     def to(self, *args, **kwargs):
@@ -613,8 +636,7 @@ class HidePolicy(nn.Module):
         batch_size, _, num_frames, height, width = video.shape
         if height % 16 != 0 or width % 16 != 0:
             raise ValueError(
-                "Video spatial dims must be multiples of 16, "
-                f"got H={height}, W={width}"
+                f"Video spatial dims must be multiples of 16, got H={height}, W={width}"
             )
         if num_frames % 4 != 1:
             raise ValueError(f"Video T must satisfy T % 4 == 1, got T={num_frames}")
@@ -918,8 +940,14 @@ class HidePolicy(nn.Module):
     def optimizer_param_groups(self, learning_rate: float, weight_decay: float):
         video_ids = {id(parameter) for parameter in self.video_dit.parameters()}
         rates = self.group_learning_rate
-        video_lr = float(rates.get("video", learning_rate))
-        action_lr = float(rates.get("action", learning_rate))
+        video_lr = float(
+            rates.get("video", learning_rate * self.learning_rate_scale.get("video", 1))
+        )
+        action_lr = float(
+            rates.get(
+                "action", learning_rate * self.learning_rate_scale.get("action", 1)
+            )
+        )
         video_params, action_params = [], []
         for parameter in self.parameters():
             if not parameter.requires_grad:
@@ -1242,6 +1270,26 @@ class HidePolicy(nn.Module):
             rand_device=rand_device,
         )
 
+    def save_video_checkpoint(self, path, *, step=None):
+        from xiconwam.actor.dit_checkpoint import save_video_weights
+
+        save_video_weights(self.video_dit, path, step=step)
+
+    def load_video_checkpoint(self, path):
+        from xiconwam.actor.dit_checkpoint import load_video_weights
+
+        load_video_weights(self.video_dit, path)
+
+    def save_action_checkpoint(self, path, *, step=None):
+        from xiconwam.actor.dit_checkpoint import save_action_weights
+
+        save_action_weights(self, path, step=step)
+
+    def load_action_checkpoint(self, path):
+        from xiconwam.actor.dit_checkpoint import load_action_weights
+
+        return load_action_weights(self, path)
+
     def save_checkpoint(self, path, optimizer=None, step=None):
         from xiconwam.actor.lora import (
             build_lora_checkpoint_payload,
@@ -1272,7 +1320,19 @@ class HidePolicy(nn.Module):
             load_standard_state_dict,
         )
 
-        payload = torch.load(path, map_location="cpu")
+        from xiconwam.actor.dit_checkpoint import ACTION_FORMAT, VIDEO_FORMAT
+
+        if str(path).endswith(".safetensors"):
+            raise ValueError(
+                "Video-only weights require load_video_checkpoint(), not load_checkpoint()"
+            )
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        if payload.get("format") == ACTION_FORMAT:
+            return self.load_action_checkpoint(path)
+        if payload.get("format") == VIDEO_FORMAT:
+            raise ValueError(
+                "Video-only weights require load_video_checkpoint(), not load_checkpoint()"
+            )
         validate_checkpoint_state_position(payload, self.state_position)
         validate_policy_action_config(self, payload)
         if endpoint.enabled(self):
@@ -1293,9 +1353,9 @@ class HidePolicy(nn.Module):
                 merge_after_load=bool(merge_lora),
             )
         elif "dit" in payload:
-            load_standard_state_dict(self.dit, payload["dit"], strict=False)
+            load_standard_state_dict(self.dit, payload["dit"], strict=True)
         else:
-            self.load_state_dict(payload, strict=False)
+            self.load_state_dict(payload, strict=True)
         if optimizer is not None and "optimizer" in payload:
             optimizer.load_state_dict(payload["optimizer"])
         return payload

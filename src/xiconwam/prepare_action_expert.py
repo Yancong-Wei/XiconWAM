@@ -10,7 +10,6 @@ from pathlib import Path
 import torch
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
-from omegaconf import OmegaConf
 
 from xiconwam.actor.action_expert import ActionExpert
 from xiconwam.kit.config_resolvers import register_default_resolvers
@@ -35,12 +34,20 @@ def compose_task(config_name: str, overrides: list[str]):
 
 
 def action_expert_spec(cfg):
-    architecture = str(cfg.model.architecture)
+    from xiconwam.model_config import (
+        action_dit,
+        as_dict,
+        resolve_action_config,
+        video_backbone,
+    )
+
+    video = as_dict(video_backbone(cfg.model))
+    action = action_dit(cfg.model)
+    if action is not None:
+        return video, resolve_action_config(video, action)
     if cfg.model.get("action_dit_config") is None:
-        raise ValueError(f"{architecture} has no action_dit_config.")
-    backbone = OmegaConf.to_container(cfg.model.backbone, resolve=True)
-    action = OmegaConf.to_container(cfg.model.action_dit_config, resolve=True)
-    return backbone, action
+        raise ValueError("The selected model has no Action DiT")
+    return video, as_dict(cfg.model.action_dit_config)
 
 
 def _dtype(name: str) -> torch.dtype:
@@ -68,10 +75,19 @@ def build_initialization(cfg, *, device: str, dtype: torch.dtype, alpha: bool):
 
 
 def configured_output(cfg) -> Path:
-    raw = cfg.model.backbone.get("action_dit_pretrained_path")
+    from xiconwam.model_config import action_dit, video_backbone
+
+    action = action_dit(cfg.model)
+    raw = (
+        action.get("pretrained_path")
+        if action is not None
+        else video_backbone(cfg.model).get("action_dit_pretrained_path")
+    )
     text = "" if raw is None else str(raw).strip()
     if text.lower() in {"", "none", "null"}:
-        raise SystemExit("backbone.action_dit_pretrained_path is empty. Pass --output.")
+        raise SystemExit(
+            "model.action_dit.pretrained_path is empty. Pass --output."
+        )
     path = Path(text)
     if not path.is_absolute():
         path = project_root() / path
@@ -83,7 +99,9 @@ def main(argv: list[str] | None = None) -> None:
         description="Resize a video DiT into an ActionExpert initialization file."
     )
     parser.add_argument("--config-name", default="task/robodojo_wan")
-    parser.add_argument("--output", help="Override backbone.action_dit_pretrained_path")
+    parser.add_argument(
+        "--output", help="Override model.action_dit.pretrained_path"
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--dtype", default="float32", choices=("float32", "float16", "bfloat16")

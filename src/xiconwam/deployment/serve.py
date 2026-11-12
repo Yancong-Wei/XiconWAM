@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+from xiconwam.model_config import video_backbone
+
 from xicon_engine import PolicyInfo, serve
 
 from .policy import HoldPolicy, XiconWAMPolicy
@@ -16,6 +18,7 @@ def load_policy(
 ):
     from hydra.utils import instantiate
     from omegaconf import OmegaConf
+    from xiconwam.data.lerobot.robot_video_dataset import configured_window_steps
 
     from xiconwam.actor.helpers.inference import configure_model_execution
     from xiconwam.data.lerobot.utils.normalizer import load_dataset_stats_from_json
@@ -37,13 +40,13 @@ def load_policy(
         raise ValueError(
             "initial deployment supports robotwin video_size=[384,320] only"
         )
-    horizon = int(data.num_frames) - 1
+    horizon = configured_window_steps(data) - 1
     ratio = int(data.action_video_freq_ratio)
     if ratio <= 0 or horizon <= 0 or horizon % ratio or (horizon // ratio) % 4:
         raise ValueError("invalid training video/action window")
     info = PolicyInfo.from_payload(json.loads(Path(contract_path).read_text()))
     if info.horizon != horizon:
-        raise ValueError("contract horizon must equal training num_frames-1")
+        raise ValueError("contract horizon must equal training window_steps-1")
     processor = instantiate(data.processor)
     if processor.drop_high_level_prob != 1.0:
         raise ValueError(
@@ -63,7 +66,7 @@ def load_policy(
         inference_steps=inference_steps,
         override_instruction=data.get("override_instruction"),
     )
-    if not cfg.model.backbone.get("load_text_encoder", False):
+    if not video_backbone(cfg.model).get("load_text_encoder", False):
         from functools import lru_cache
 
         from xiconwam.data.lerobot.text_embedding_cache import (

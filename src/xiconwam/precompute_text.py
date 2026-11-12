@@ -8,6 +8,8 @@ import os
 import uuid
 from pathlib import Path
 
+from xiconwam.model_config import video_backbone
+
 import torch
 import torch.distributed as dist
 from hydra import compose, initialize_config_dir
@@ -101,7 +103,7 @@ def encode_prompts(cfg, prompts: list[str], *, overwrite: bool) -> None:
     is_distributed, rank, world_size, local_rank = _distributed()
     dataset_dirs, cache_dir, context_len = dataset_text_settings(cfg)
     del dataset_dirs
-    backbone = normalize_spec(OmegaConf.to_container(cfg.model.backbone, resolve=True))
+    backbone = normalize_spec(OmegaConf.to_container(video_backbone(cfg.model), resolve=True))
     encoder_id = str(backbone["text_encoder_id"])
     dtype = mixed_precision_to_dtype(cfg.mixed_precision)
     local = prompts[rank::world_size] if is_distributed else prompts

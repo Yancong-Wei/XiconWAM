@@ -1,0 +1,22 @@
+name: actiondit
+checkpoint: null
+from_scratch: false
+pretrained_path: ./playground/pretrained_models/ActionDiT_Flux2_4b.pt
+dit_config:
+  preset: staged
+  action_dim: 48
+  hidden_dim: 1024
+  num_heads: ${model.video_dit.num_heads}
+  attn_head_dim: ${model.video_dit.attn_head_dim}
+  text_dim: ${model.video_dit.text_dim}
+  attention_backend: ${model.video_dit.attention_backend}
+  use_gradient_checkpointing: false
+  cross_attention: false
+  num_layers_double: ${model.video_dit.num_layers_double}
+  num_layers_single: ${model.video_dit.num_layers_single}
+  mlp_ratio: 4.0
+  max_action_horizon: 1024
+scheduler:
+  train_shift: 5.0
+  infer_shift: 5.0
+  num_train_timesteps: 1000

@@ -1,21 +1,13 @@
-import logging
-import json
-import inspect
 import math
 import os
-import re
-import shutil
 from contextlib import nullcontext
 from importlib.metadata import version as package_version
-from pathlib import Path
 import time
 
-import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.utils import DistributedType
 from omegaconf import DictConfig, OmegaConf
-from PIL import Image
 from torch.optim.lr_scheduler import (
     ConstantLR,
     CosineAnnealingLR,
@@ -26,15 +18,9 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from xiconwam.kit.fs import ensure_dir
-from xiconwam.kit.logging_config import get_logger, setup_logging
+from xiconwam.kit.logging_config import get_logger
 from xiconwam.kit.pytorch_utils import set_global_seed, normalize_mixed_precision
 from xiconwam.kit.samplers import ResumableEpochSampler
-from xiconwam.kit.video_io import save_mp4
-from xiconwam.kit.video_metrics import (
-    pil_frames_to_video_tensor,
-    video_psnr,
-    video_ssim_triplet,
-)
 
 logger = get_logger(__name__)
 
@@ -168,6 +154,8 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
             self.max_grad_norm,
         )
         if self.is_deepspeed and deepspeed_plugin is not None:
+            # One source of truth for both the trainer and DeepSpeed engine.
+            deepspeed_config["gradient_clipping"] = self.max_grad_norm
             apply_deepspeed_runtime_settings(deepspeed_config)
         logger.info("using accelerator.device=%s", self.accelerator.device)
         logger.info(
@@ -193,7 +181,44 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
         self._resolve_train_schedule()
 
         # Freeze modules before ZeRO builds optimizer state.
-        self._apply_dit_only_train_mode(self.model)
+        policy = getattr(self.model, "training_policy", {})
+        default_mode = (
+            "video_only" if getattr(self.model, "video_only", False) else "joint"
+        )
+        self.dit_train_mode = str(
+            policy.get("mode", cfg.get("dit_train_mode", default_mode))
+        )
+        if self.dit_train_mode not in {"joint", "action_only", "video_only"}:
+            raise ValueError(
+                "model.training.mode must be joint, action_only, or video_only"
+            )
+        if (self.dit_train_mode == "video_only") != bool(
+            getattr(self.model, "video_only", False)
+        ):
+            raise ValueError("video_only training requires model=video")
+        self.freeze_video_dit = (
+            bool(policy.get("freeze_video", cfg.get("freeze_video_dit", False)))
+            or self.dit_train_mode == "action_only"
+        )
+        self.freeze_action_dit = bool(
+            policy.get("freeze_action", cfg.get("freeze_action_dit", False))
+        )
+        if self.dit_train_mode == "video_only" and self.freeze_video_dit:
+            raise ValueError("Video-only training requires a trainable Video DiT")
+        if self.dit_train_mode == "action_only":
+            if (
+                not hasattr(self.model, "save_action_checkpoint")
+                or self.freeze_action_dit
+            ):
+                raise ValueError(
+                    "action_only requires a policy with a trainable Action DiT"
+                )
+            self.model.loss_lambda_video = 0.0
+        if self.freeze_video_dit and self.freeze_action_dit:
+            raise ValueError("At least one DiT must be trainable")
+        self._apply_dit_only_train_mode(
+            self.model, self.freeze_video_dit, self.freeze_action_dit
+        )
         total_params = _count_parameters(self.model)
         trainable_params_count = _count_parameters(self.model, trainable_only=True)
         if self.accelerator.is_main_process:
@@ -474,7 +499,7 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
             ) from e
 
         self.wandb_run = wandb.init(
-            entity=self.cfg.wandb.workspace,
+            entity=self.cfg.wandb.get("entity", self.cfg.wandb.get("workspace")),
             project=self.cfg.wandb.project,
             name=self.cfg.wandb.name,
             group=(
@@ -486,8 +511,8 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
             dir=self.output_dir,
         )
         logger.info(
-            "Initialized wandb run: workspace=%s project=%s name=%s",
-            self.cfg.wandb.workspace,
+            "Initialized wandb run: entity=%s project=%s name=%s",
+            self.cfg.wandb.get("entity", self.cfg.wandb.get("workspace")),
             self.cfg.wandb.project,
             self.cfg.wandb.name,
         )
@@ -533,6 +558,9 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
             "num_workers": self.num_workers,
             "pin_memory": self.dataloader_pin_memory,
             "worker_init_fn": worker_init_fn,
+            # Iterator construction draws a worker seed even with num_workers=0.
+            # Keep that draw out of the model RNG restored from checkpoints.
+            "generator": torch.Generator().manual_seed(self.seed),
         }
         if self.num_workers > 0:
             loader_kwargs["persistent_workers"] = self.dataloader_persistent_workers
@@ -592,7 +620,9 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
                 return WarmupLR(
                     self.optimizer,
                     warmup_min_lr=0.0,
-                    warmup_max_lr=self.learning_rate,
+                    warmup_max_lr=[
+                        group["lr"] for group in self.optimizer.param_groups
+                    ],
                     warmup_num_steps=deepspeed_warmup_steps,
                     warmup_type="linear",
                 )
@@ -636,26 +666,44 @@ class TrainSession(CheckpointMixin, EvaluateMixin):
     def _set_dit_only_train_mode(self):
         logger.info("Setting DiT to train mode and freezing other model components.")
         model = self.accelerator.unwrap_model(self.model)
-        self._apply_dit_only_train_mode(model)
+        self._apply_dit_only_train_mode(
+            model, self.freeze_video_dit, self.freeze_action_dit
+        )
 
     @staticmethod
-    def _apply_dit_only_train_mode(model):
+    def _apply_dit_only_train_mode(model, freeze_video=False, freeze_action=False):
         model.eval()
         model.requires_grad_(False)
         model.dit.train()
         model.dit.requires_grad_(True)
         video_dit = getattr(model, "video_dit", None)
         apply_constraints = getattr(video_dit, "apply_training_constraints", None)
-        if apply_constraints is not None:
+        if apply_constraints is not None and not freeze_video:
             apply_constraints()
         from xiconwam.actor.lora import has_lora, set_video_dit_lora_trainable
 
-        if video_dit is not None and has_lora(video_dit):
+        if not freeze_video and video_dit is not None and has_lora(video_dit):
             set_video_dit_lora_trainable(video_dit)
         state_encoder = getattr(model, "state_encoder", None)
         if state_encoder is not None:
             state_encoder.train()
             state_encoder.requires_grad_(True)
+        if freeze_video:
+            if video_dit is None:
+                raise ValueError("Model does not expose a Video DiT")
+            video_dit.eval().requires_grad_(False)
+        if freeze_action:
+            action_dit = getattr(model, "action_expert", None)
+            if action_dit is None:
+                action_dit = getattr(model, "action_dit", None)
+            if action_dit is None:
+                raise ValueError("Model does not expose an Action DiT")
+            action_dit.eval().requires_grad_(False)
+            if state_encoder is not None:
+                state_encoder.eval().requires_grad_(False)
+            action_projector = getattr(model, "video_context_projector", None)
+            if action_projector is not None:
+                action_projector.eval().requires_grad_(False)
 
     def _accumulate_train_interval(
         self,

@@ -1,40 +1,12 @@
-import logging
 import json
-import inspect
-import math
 import os
 import re
 import shutil
-from contextlib import nullcontext
-from importlib.metadata import version as package_version
 from pathlib import Path
 import time
 
-import numpy as np
-import torch
-from accelerate import Accelerator
-from accelerate.utils import DistributedType
-from omegaconf import DictConfig, OmegaConf
-from PIL import Image
-from torch.optim.lr_scheduler import (
-    ConstantLR,
-    CosineAnnealingLR,
-    LinearLR,
-    SequentialLR,
-)
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
-
 from xiconwam.kit.fs import ensure_dir
-from xiconwam.kit.logging_config import get_logger, setup_logging
-from xiconwam.kit.pytorch_utils import set_global_seed, normalize_mixed_precision
-from xiconwam.kit.samplers import ResumableEpochSampler
-from xiconwam.kit.video_io import save_mp4
-from xiconwam.kit.video_metrics import (
-    pil_frames_to_video_tensor,
-    video_psnr,
-    video_ssim_triplet,
-)
+from xiconwam.kit.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -57,53 +29,6 @@ def _drop_file_cache(path: str) -> None:
         os.close(fd)
 
 
-def _cfg_none(value) -> bool:
-    if value is None:
-        return True
-    # OmegaConf.is_none exists in 2.4+; 2.3 stores YAML null as Python None.
-    is_none = getattr(OmegaConf, "is_none", None)
-    return bool(is_none(value)) if callable(is_none) else False
-
-
-class DataLoaderWorkerInit:
-    def __init__(self, base_worker_init_fn, worker_threads: int):
-        self.base_worker_init_fn = base_worker_init_fn
-        self.worker_threads = int(worker_threads)
-
-    def __call__(self, worker_id: int):
-        if self.base_worker_init_fn is not None:
-            self.base_worker_init_fn(worker_id)
-        if self.worker_threads > 0:
-            torch.set_num_threads(self.worker_threads)
-
-
-def _count_parameters(module, trainable_only: bool = False) -> int:
-    return sum(
-        p.numel() for p in module.parameters() if not trainable_only or p.requires_grad
-    )
-
-
-def _forward_training_model(model, sample):
-    output = model(sample)
-    if not isinstance(output, tuple) or len(output) != 2:
-        raise TypeError(
-            "Training model forward must return a `(loss, metrics)` tuple, "
-            f"got {type(output).__name__}."
-        )
-    loss, metrics = output
-    if not isinstance(loss, torch.Tensor) or loss.ndim != 0:
-        raise TypeError(
-            "Training model forward must return a scalar tensor as loss, "
-            f"got {type(loss).__name__} with shape={getattr(loss, 'shape', None)}."
-        )
-    if not isinstance(metrics, dict):
-        raise TypeError(
-            "Training model forward must return a dict as metrics, "
-            f"got {type(metrics).__name__}."
-        )
-    return loss, metrics
-
-
 class CheckpointMixin:
     def _resume_or_load_checkpoint(self):
         resume = self.resume
@@ -121,20 +46,20 @@ class CheckpointMixin:
             str(resume_path), optimizer=None
         )
         logger.warning(
-            "Loaded .pt weights only; optimizer/scheduler/step were not restored under ZeRO2."
+            "Loaded model weights only; optimizer/scheduler/step were not restored under ZeRO2."
         )
 
     def _save_weights_checkpoint(self, step_tag: str):
         model = self.accelerator.unwrap_model(self.model)
-        ckpt_path = os.path.join(self.weights_dir, f"{step_tag}.pt")
-        temporary_path = f"{ckpt_path}.tmp"
+        suffix = getattr(model, "weights_suffix", ".pt")
+        ckpt_path = os.path.join(self.weights_dir, f"{step_tag}{suffix}")
+        temporary_path = os.path.join(self.weights_dir, f"{step_tag}.tmp{suffix}")
         started_at = time.perf_counter()
         logger.info("[ckpt] saving weights: %s", ckpt_path)
-        model.save_checkpoint(
-            temporary_path,
-            optimizer=None,
-            step=self.global_step,
-        )
+        if getattr(self, "dit_train_mode", "joint") == "action_only":
+            model.save_action_checkpoint(temporary_path, step=self.global_step)
+        else:
+            model.save_checkpoint(temporary_path, optimizer=None, step=self.global_step)
         os.replace(temporary_path, ckpt_path)
         size_gib = os.path.getsize(ckpt_path) / (1024**3)
         logger.info(
@@ -152,8 +77,10 @@ class CheckpointMixin:
             "epoch": int(self.epoch),
             "batch_in_epoch": int(self.batch_in_epoch),
         }
-        with open(state_file, "w", encoding="utf-8") as f:
+        temporary = state_file + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
+        os.replace(temporary, state_file)
 
     @staticmethod
     def _prune_step_artifacts(directory: str, max_to_keep: int, *, suffix: str = ""):
@@ -181,10 +108,11 @@ class CheckpointMixin:
     def _prune_saved_checkpoints(self):
         if self.checkpoint_save_limit is None:
             return
+        model = self.accelerator.unwrap_model(self.model)
         self._prune_step_artifacts(
             self.weights_dir,
             self.checkpoint_save_limit,
-            suffix=".pt",
+            suffix=getattr(model, "weights_suffix", ".pt"),
         )
         self._prune_step_artifacts(
             self.state_dir,
@@ -202,6 +130,10 @@ class CheckpointMixin:
 
         state_path = os.path.join(self.state_dir, step_tag)
         ensure_dir(state_path)
+        if self.accelerator.is_main_process:
+            # A failed rewrite of this step must not leave an old completion marker.
+            (Path(state_path) / "trainer_state.json").unlink(missing_ok=True)
+        self.accelerator.wait_for_everyone()
         state_started_at = time.perf_counter()
         if self.accelerator.is_main_process:
             logger.info("[ckpt] saving distributed state: %s", state_path)
@@ -211,6 +143,8 @@ class CheckpointMixin:
         finally:
             if restore_zero_save is not None:
                 restore_zero_save()
+        # Publish the completion marker after every rank finishes its state shard.
+        self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
             self._save_trainer_state(state_path)
             logger.info(
@@ -265,6 +199,17 @@ class CheckpointMixin:
             if "epoch" in payload and "batch_in_epoch" in payload:
                 self.epoch = int(payload["epoch"])
                 self.batch_in_epoch = int(payload["batch_in_epoch"])
+                # An exhausted restored iterator yields nothing, so Accelerate
+                # does not advance its epoch. Resume directly at the next one.
+                batches_per_epoch = (
+                    self.dataset_size
+                    + self.batch_size * self.accelerator.num_processes
+                    - 1
+                ) // (self.batch_size * self.accelerator.num_processes)
+                completed_epochs, self.batch_in_epoch = divmod(
+                    self.batch_in_epoch, batches_per_epoch
+                )
+                self.epoch += completed_epochs
                 self.train_sampler.set_epoch_offset(self.epoch)
                 self.train_sampler.set_resume_batch_offset(self.batch_in_epoch)
                 logger.info(

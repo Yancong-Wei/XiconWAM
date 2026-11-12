@@ -93,7 +93,7 @@ def inject_video_dit_lora(video_dit: nn.Module, config: Any) -> LoraConfig:
     ]
     if invalid:
         raise RuntimeError(
-            "LoRA was injected outside the visual transformer blocks: " f"{invalid[:8]}"
+            f"LoRA was injected outside the visual transformer blocks: {invalid[:8]}"
         )
 
     blocks = getattr(video_dit, "blocks", None)
@@ -186,6 +186,7 @@ def lora_model_checkpoint_state(model: nn.Module) -> dict[str, Any]:
 
     return {
         "lora_roots": lora_roots,
+        "trainable_keys": sorted(trainable_state),
         "trainable_state": trainable_state,
     }
 
@@ -222,6 +223,27 @@ def load_lora_model_checkpoint_state(
     ):
         raise ValueError(
             "LoRA checkpoint must contain `trainable_state` and `lora_roots`."
+        )
+
+    expected_roots = set(_find_lora_roots(model))
+    if set(lora_roots) != expected_roots:
+        raise ValueError("LoRA checkpoint roots do not match the model configuration")
+    saved_keys = payload.get("trainable_keys")
+    if saved_keys is not None:
+        if not isinstance(saved_keys, (list, tuple)) or not all(
+            isinstance(key, str) for key in saved_keys
+        ):
+            raise ValueError(
+                "LoRA checkpoint `trainable_keys` must be a list of strings"
+            )
+        if set(saved_keys) != set(trainable_state):
+            raise ValueError(
+                "LoRA checkpoint is missing or has extra trainable tensors"
+            )
+    else:
+        logger.warning(
+            "Legacy LoRA checkpoint has no trainable-key inventory; "
+            "missing trainable tensors cannot be fully verified."
         )
 
     for name in lora_roots:

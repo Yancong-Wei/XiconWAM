@@ -25,11 +25,10 @@ train:
   # Dual-arm joints -> unify slots 0-13. Model UNIFY_DIM is fixed; do not set it here.
   unify_action_map: ["0-13"]
   unify_state_map: null
-  num_frames: 33
+  window_steps: 33  # Raw control ticks: 32 actions and 9 sampled video frames.
   global_sample_stride: 1
   action_video_freq_ratio: 4
   video_size: [384, 320]
-  camera_key: null
   camera_layout: [cam_high, cam_left_wrist, cam_right_wrist]
   val_set_proportion: 0.01
   is_training_set: true
@@ -39,15 +38,15 @@ train:
   load_text_encoder_on_miss: false
   preflight_text_cache: true
   max_read_retries: 2
-  backbone: ${model.backbone}
+  video_dit: ${model.video_dit}
   processor:
     _target_: xiconwam.data.lerobot.processors.window_packer.WindowPacker
     shape_meta: ${..shape_meta}
-    num_obs_steps: ${..num_frames}
+    num_obs_steps: ${..window_steps}
     stack_images: false
     include_gt_action: false
-    action_output_dim: ${model.backbone.action_expert.action_dim}
-    proprio_output_dim: ${model.state_dim}
+    action_output_dim: ${oc.select:model.action_dit.dit_config.action_dim,48}
+    proprio_output_dim: ${oc.select:model.state_dim,48}
     action_state_transforms: null
     use_stepwise_action_norm: false
     norm_default_mode: z-score
@@ -65,7 +64,7 @@ train:
       contrast: 0.2
       saturation: 0.2
       hue: 0.0
-  text_embedding_cache_dir: ./playground/datasets/text_embeds_cache/robodojo/${model.backbone.name}
-  context_len: ${model.backbone.tokenizer_max_len}
-  text_encoder_id: ${model.backbone.text_encoder_id}
+  text_embedding_cache_dir: ./playground/datasets/text_embeds_cache/robodojo/${model.video_dit.name}
+  context_len: ${model.video_dit.tokenizer_max_len}
+  text_encoder_id: ${model.video_dit.text_encoder_id}
   mixed_precision: ${mixed_precision}

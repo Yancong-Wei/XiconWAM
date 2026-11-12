@@ -13,6 +13,7 @@ from xiconwam.data.lerobot.transforms.action_state_merger import (
 from xiconwam.kit.config_resolvers import register_default_resolvers
 from xiconwam.launch import validation_dataset_config
 from xiconwam.prepare_action_expert import action_expert_spec
+from xiconwam.model_config import resolve_action_config
 from xiconwam.precompute_text import dataset_text_settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,7 +45,7 @@ class ComposeTest(unittest.TestCase):
         cfg = self._compose()
         self.assertEqual(cfg.model._target_, "xiconwam.launch.build_model")
         self.assertEqual(cfg.model.architecture, "mot")
-        self.assertEqual(cfg.model.backbone.name, "wan22")
+        self.assertEqual(cfg.model.video_dit.name, "wan22")
         self.assertEqual(cfg.data.train.shape_meta.action[0].shape, 14)
         self.assertEqual(list(cfg.data.train.unify_action_map), ["0-13"])
         self.assertEqual(cfg.data.train.processor.action_output_dim, 48)
@@ -63,18 +64,18 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(cfg.weight_decay, 1.0e-2)
         self.assertEqual(cfg.warmup_ratio, 0.05)
         self.assertEqual(cfg.seed, 42)
-        self.assertFalse(cfg.model.lora.enable)
-        self.assertFalse(cfg.model.backbone.use_gradient_checkpointing)
+        self.assertFalse(cfg.model.video_dit.lora.enable)
+        self.assertFalse(cfg.model.video_dit.use_gradient_checkpointing)
         self.assertEqual(int(cfg.zero), 2)
         self.assertFalse(cfg.zero_offload)
-        expert = OmegaConf.to_container(cfg.model.action_dit_config, resolve=True)
+        _, expert = action_expert_spec(cfg)
         self.assertEqual(expert["preset"], "standard")
         self.assertEqual(expert["action_dim"], 48)
         self.assertEqual(expert["hidden_dim"], 1024)
         self.assertEqual(expert["ffn_dim"], 4096)
         self.assertEqual(expert["num_heads"], 24)
         self.assertEqual(expert["num_layers"], 30)
-        self.assertIn("ActionDiT_Wan22_5b.pt", cfg.model.action_dit_pretrained_path)
+        self.assertIn("ActionDiT_Wan22_5b.pt", cfg.model.action_dit.pretrained_path)
         self.assertEqual(cfg.model.loss.lambda_video, 1.0)
 
     def test_models_are_separate_configs(self):
@@ -85,23 +86,25 @@ class ComposeTest(unittest.TestCase):
         hide = self._compose("task/robodojo_cosmos", "model=hide")
         resolved = OmegaConf.to_container(hide.model, resolve=True)
         self.assertEqual(resolved["architecture"], "hide")
-        self.assertEqual(resolved["extract_layer"], 16)
+        self.assertEqual(resolved["feature_layer"], "auto")
         self.assertEqual(resolved["feature_timestep"], 1.0)
-        self.assertEqual(resolved["action_dit_config"]["hidden_dim"], 1024)
-        self.assertEqual(resolved["action_dit_config"]["num_layers"], 28)
-        self.assertEqual(resolved["action_dit_config"]["num_heads"], 16)
-        self.assertTrue(resolved["action_dit_config"]["cross_attention"])
+        action = resolve_action_config(resolved["video_dit"], resolved["action_dit"])
+        self.assertEqual(action["hidden_dim"], 1024)
+        self.assertEqual(action["num_layers"], 28)
+        self.assertEqual(action["num_heads"], 16)
+        self.assertTrue(action["cross_attention"])
         self.assertIn(
-            "ActionDiT_Cosmos25_2b.pt", resolved["action_dit_pretrained_path"]
+            "ActionDiT_Cosmos25_2b.pt",
+            resolved["action_dit"]["pretrained_path"],
         )
-        self.assertEqual(resolved["group_learning_rate"]["video"], 1.0e-5)
-        self.assertEqual(resolved["group_learning_rate"]["action"], 1.0e-4)
+        self.assertEqual(resolved["learning_rate_scale"]["video"], 0.1)
+        self.assertEqual(resolved["learning_rate_scale"]["action"], 1.0)
         self.assertNotIn("action_head", resolved)
         self.assertNotIn("detach_video_hidden", resolved)
 
     def test_flux_action_expert_matches_the_staged_tower(self):
         cfg = self._compose("task/robodojo_flux")
-        expert = OmegaConf.to_container(cfg.model.action_dit_config, resolve=True)
+        _, expert = action_expert_spec(cfg)
         self.assertEqual(expert["preset"], "staged")
         self.assertFalse(expert["cross_attention"])
         self.assertEqual(expert["num_layers_double"], 5)
@@ -140,7 +143,8 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(hide_action["hidden_dim"], action["hidden_dim"])
         self.assertEqual(hide_action["num_layers"], action["num_layers"])
         self.assertEqual(
-            hide.model.action_dit_pretrained_path, mot.model.action_dit_pretrained_path
+            hide.model.action_dit.pretrained_path,
+            mot.model.action_dit.pretrained_path,
         )
 
     def test_mixture_data_composes(self):
@@ -161,11 +165,11 @@ class ComposeTest(unittest.TestCase):
     def test_layout(self):
         self.assertEqual(
             sorted(path.stem for path in (ROOT / "configs/model").glob("*.yaml")),
-            ["hide", "idm", "mot"],
+            ["hide", "idm", "mot", "video"],
         )
         self.assertEqual(
             sorted(path.stem for path in (ROOT / "configs/data").glob("*.yaml")),
-            ["mixture", "robodojo"],
+            ["mixture", "robodojo", "video"],
         )
         self.assertFalse((ROOT / "configs/config.yaml").exists())
         self.assertFalse((ROOT / "configs/train").exists())

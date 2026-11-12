@@ -17,6 +17,8 @@ from pathlib import Path, PurePosixPath
 
 from omegaconf import OmegaConf
 
+from xiconwam.model_config import action_dit
+
 FORMAT = "xiconwam.deployment"
 VERSION = 1
 logger = logging.getLogger(__name__)
@@ -111,6 +113,10 @@ def export_bundle(
     from xicon_engine import PolicyInfo
     from hydra.utils import instantiate
 
+    from xiconwam.data.lerobot.robot_video_dataset import (
+        configured_window_steps,
+        trained_window,
+    )
     from xiconwam.data.lerobot.utils.normalizer import load_dataset_stats_from_json
     from xiconwam.deployment.policy import XiconWAMPolicy
     from xiconwam.kit.config_resolvers import register_default_resolvers
@@ -143,7 +149,7 @@ def export_bundle(
     data = cfg.data.train
     info = PolicyInfo.from_payload(json.loads(contract.read_text()))
     if (
-        info.horizon != int(data.num_frames) - 1
+        info.horizon != configured_window_steps(data) - 1
         or info.fps <= 0
         or list(data.camera_layout) != list(info.camera_keys)
     ):
@@ -165,9 +171,9 @@ def export_bundle(
                 )
     if data.concat_multi_camera != "robotwin" or list(data.video_size) != [384, 320]:
         raise ValueError("Current serving requires robotwin video_size=[384,320]")
-    from xiconwam.data.lerobot.robot_video_dataset import trained_window
-
-    video_frames, _ = trained_window(data.num_frames, data.action_video_freq_ratio)
+    video_frames, _ = trained_window(
+        configured_window_steps(data), data.action_video_freq_ratio
+    )
     processor = instantiate(data.processor)
     if processor.drop_high_level_prob != 1.0:
         raise ValueError(
@@ -222,15 +228,40 @@ def export_bundle(
             OmegaConf.update(cfg, key, relative)
 
         # These are the supported backend loader's active filesystem inputs.
-        backbone = cfg.model.backbone
+        backbone_key = next(
+            key
+            for key in ("video_dit", "video_backbone", "backbone")
+            if cfg.model.get(key) is not None
+        )
+        backbone = cfg.model[backbone_key]
         active = ["model_id", "model_path", "ae_model_path"]
         if backbone.get("load_text_encoder", False):
-            active += ["tokenizer_model_id", "reason_model_id", "qwen3_model_spec"]
-        active += ["action_dit_pretrained_path"]
+            active += ["reason_model_id", "qwen3_model_spec"]
         for key in active:
             value = backbone.get(key)
             if value:
-                asset(f"model.backbone.{key}", value)
+                asset(f"model.{backbone_key}.{key}", value)
+        action = action_dit(cfg.model)
+        if action is not None:
+            action_key = (
+                "action_dit"
+                if cfg.model.get("action_dit") is not None
+                else (
+                    "action_backbone"
+                    if cfg.model.get("action_backbone") is not None
+                    else f"{backbone_key}.action_dit"
+                )
+            )
+            key = "checkpoint" if action.get("checkpoint") else "pretrained_path"
+            if action.get(key) and not (
+                key == "pretrained_path" and action.get("from_scratch", False)
+            ):
+                asset(f"model.{action_key}.{key}", action[key])
+        elif backbone.get("action_dit_pretrained_path"):
+            asset(
+                f"model.{backbone_key}.action_dit_pretrained_path",
+                backbone.action_dit_pretrained_path,
+            )
         if cfg.model.get("action_dit_pretrained_path"):
             asset(
                 "model.action_dit_pretrained_path", cfg.model.action_dit_pretrained_path
@@ -248,8 +279,10 @@ def export_bundle(
         data.load_text_encoder_on_miss = False
         data.backbone = OmegaConf.to_container(backbone, resolve=True)
         for key, value in list(bindings.items()):
-            if key.startswith("model.backbone."):
-                bindings[key.replace("model.backbone.", "data.train.backbone.")] = value
+            if key.startswith(f"model.{backbone_key}."):
+                bindings[
+                    key.replace(f"model.{backbone_key}.", "data.train.backbone.")
+                ] = value
         shutil.copyfile(checkpoint, stage / "checkpoint.pt")
         (stage / "contract.json").write_text(
             json.dumps(info.to_payload(), indent=2) + "\n"

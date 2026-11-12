@@ -19,7 +19,6 @@ register_default_resolvers()
 @pytest.mark.parametrize(
     "task,backbone",
     [
-        ("robodojo", "wan22"),
         ("robodojo_wan", "wan22"),
         ("robodojo_cosmos", "cosmos25"),
         ("robodojo_flux", "flux2"),
@@ -29,7 +28,7 @@ def test_recipes_keep_source_aware_validation(task, backbone):
     with initialize_config_dir(config_dir=str(ROOT / "configs"), version_base="1.3"):
         cfg = compose(config_name=f"task/{task}", overrides=["data=mixture"])
     OmegaConf.resolve(cfg)
-    assert cfg.model.backbone.name == backbone
+    assert cfg.model.video_dit.name == backbone
     assert cfg.eval_num_samples == 4
     assert cfg.eval_seed == 42
     assert cfg.data.train.sources.robodojo.config.processor.action_output_dim == 48

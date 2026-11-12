@@ -1,0 +1,47 @@
+name: flux2
+from_scratch: false
+variant: klein-base-4b
+model_path: ./playground/pretrained_models/flux2/FLUX.2-klein-base-4B/flux-2-klein-base-4b.safetensors
+ae_model_path: ./playground/pretrained_models/flux2/FLUX.2-dev/ae.safetensors
+qwen3_model_spec: Qwen/Qwen3-4B
+qwen3_output_layers: [9, 18, 27]
+tokenizer_max_len: 512
+load_text_encoder: false
+text_encoder_id: qwen3_flux2
+text_dim: ${.dit_config.context_in_dim}
+attention_backend: auto
+use_gradient_checkpointing: false
+hidden_dim: ${.dit_config.hidden_size}
+freq_dim: 256
+num_heads: ${.dit_config.num_heads}
+attn_head_dim: 128
+num_layers_double: ${.dit_config.depth}
+num_layers_single: ${.dit_config.depth_single_blocks}
+
+dit_config:
+  in_channels: 128
+  context_in_dim: 7680
+  hidden_size: 3072
+  num_heads: 24
+  depth: 5
+  depth_single_blocks: 20
+  axes_dim: [32, 32, 32, 32]
+  theta: 2000
+  mlp_ratio: 3.0
+  use_guidance_embed: false
+
+video_scheduler:
+  family: continuous_flow
+  train_shift: 5.0
+  infer_shift: 5.0
+  num_train_timesteps: 1000
+lora_target_modules:
+  - transformer.double_blocks
+  - transformer.single_blocks
+
+# Adapter settings belong to the video component; frozen encoders are not adapted.
+lora:
+  enable: false
+  target: video
+  rank: 16
+  alpha: 32

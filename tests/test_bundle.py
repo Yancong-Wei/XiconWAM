@@ -26,17 +26,18 @@ register_default_resolvers()
 def inputs(tmp_path):
     root = Path(__file__).resolve().parents[1]
     with initialize_config_dir(config_dir=str(root / "configs"), version_base="1.3"):
-        cfg = compose(config_name="task/robodojo", overrides=["mixed_precision='no'"])
+        cfg = compose(
+            config_name="task/robodojo_wan", overrides=["mixed_precision='no'"]
+        )
     OmegaConf.resolve(cfg)
     assets = tmp_path / "input"
     assets.mkdir()
     (assets / "backbone").mkdir()
     (assets / "backbone/weights.bin").write_bytes(b"fixture-backbone")
     (assets / "expert.pt").write_bytes(b"fixture-action-initializer")
-    cfg.model.backbone.model_id = "backbone"
-    cfg.model.backbone.text_dim = 8
-    cfg.model.backbone.action_dit_pretrained_path = "expert.pt"
-    cfg.model.action_dit_pretrained_path = "expert.pt"
+    cfg.model.video_dit.model_id = "backbone"
+    cfg.model.video_dit.text_dim = 8
+    cfg.model.action_dit.pretrained_path = "expert.pt"
     cfg.data.train.pretrained_norm_stats = "stats.json"
     cfg.data.train.text_embedding_cache_dir = "text"
     cfg.data.train.dataset_dirs = []
@@ -101,7 +102,7 @@ def test_bundle_moves_without_original_paths_and_loads_through_service(
     shutil.move(output, moved)
     shutil.rmtree(inputs["base_dir"])
     cfg, checkpoint, contract = load_bundle_config(moved)
-    assert Path(cfg.model.backbone.model_id).is_dir()
+    assert Path(cfg.model.video_dit.model_id).is_dir()
     assert Path(cfg.data.train.pretrained_norm_stats).is_file()
     assert cfg.data.train.dataset_dirs == []
     assert checkpoint.read_bytes() == b"fixture-trained-checkpoint"
@@ -186,7 +187,7 @@ def test_inventory_and_traversal(inputs, tmp_path):
     (output / "extra").unlink()
     path = output / "manifest.json"
     manifest = json.loads(path.read_text())
-    manifest["resource_bindings"]["model.backbone.model_id"] = "../input"
+    manifest["resource_bindings"]["model.video_dit.model_id"] = "../input"
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="Invalid bundle member"):
         verify_bundle(output)
@@ -224,3 +225,23 @@ def test_mixture_export_requires_explicit_source_and_preserves_its_stats(
     bundled, _, _ = load_bundle_config(output)
     assert bundled.data.train.processor.action_state_merger.unify_action_map == ["0-13"]
     assert Path(bundled.data.train.pretrained_norm_stats).is_file()
+
+
+def test_bundle_relocates_video_model_and_action_checkpoint(inputs, tmp_path):
+    cfg = OmegaConf.load(inputs["config"])
+    cfg.model.action_dit.checkpoint = "action.pt"
+    # A complete action checkpoint supplies all action weights.
+    cfg.model.action_dit.pretrained_path = "unused-initializer.pt"
+    assets = inputs["base_dir"]
+    Path(assets / cfg.model.video_dit.model_id).mkdir(parents=True, exist_ok=True)
+    (assets / cfg.model.video_dit.model_id / "diffusion_pytorch_model.safetensors").write_bytes(b"fixture-video")
+    (assets / "action.pt").write_bytes(b"fixture-action")
+    OmegaConf.save(cfg, inputs["config"])
+    bundle = tmp_path / "separate-checkpoints"
+    export_bundle(**inputs, output=bundle, instructions=["pick"])
+    loaded, _, _ = load_bundle_config(bundle)
+    assert (Path(loaded.model.video_dit.model_id) / "diffusion_pytorch_model.safetensors").read_bytes() == b"fixture-video"
+    assert (
+        Path(loaded.model.action_dit.checkpoint).read_bytes()
+        == b"fixture-action"
+    )

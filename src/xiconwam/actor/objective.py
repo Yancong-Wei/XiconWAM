@@ -412,25 +412,27 @@ class ObjectiveMixin:
             },
         )
 
-        pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
-
         pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
+        if self.loss_lambda_video == 0.0:
+            loss_video = pred_action.new_zeros((), dtype=torch.float32)
+        else:
+            pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
 
-        include_initial_video_step = inputs["first_frame_latents"] is None
-        if inputs["first_frame_latents"] is not None:
-            pred_video = pred_video[:, :, 1:]
-            target_video = target_video[:, :, 1:]
+            include_initial_video_step = inputs["first_frame_latents"] is None
+            if inputs["first_frame_latents"] is not None:
+                pred_video = pred_video[:, :, 1:]
+                target_video = target_video[:, :, 1:]
 
-        loss_video_per_sample = self._compute_video_loss_per_sample(
-            pred_video=pred_video,
-            target_video=target_video,
-            image_is_pad=image_is_pad,
-            include_initial_video_step=include_initial_video_step,
-        )
-        video_weight = self.train_video_scheduler.training_weight(timestep_video).to(
-            loss_video_per_sample.device, dtype=loss_video_per_sample.dtype
-        )
-        loss_video = (loss_video_per_sample * video_weight).mean()
+            loss_video_per_sample = self._compute_video_loss_per_sample(
+                pred_video=pred_video,
+                target_video=target_video,
+                image_is_pad=image_is_pad,
+                include_initial_video_step=include_initial_video_step,
+            )
+            video_weight = self.train_video_scheduler.training_weight(timestep_video).to(
+                loss_video_per_sample.device, dtype=loss_video_per_sample.dtype
+            )
+            loss_video = (loss_video_per_sample * video_weight).mean()
 
         action_loss_per_sample = masked_action_mse_per_sample(
             pred_action,

@@ -339,22 +339,11 @@ class XiconServeRuntime:
         from xiconwam.actor.helpers.inference import configure_model_execution
 
         cfg = OmegaConf.load(self.config_path)
-        # Training may leave text encoder unloaded (cached embeds). Inference
-        # needs an online encoder for free-form task instructions.
-        if OmegaConf.select(cfg, "model.backbone") is not None:
-            OmegaConf.update(cfg, "model.backbone.load_text_encoder", True, merge=True)
-        for key in (
-            "model.backbone.model_id",
-            "model.backbone.tokenizer_model_id",
-            "model.backbone.action_dit_pretrained_path",
-            "model.action_dit_pretrained_path",
-        ):
-            value = OmegaConf.select(cfg, key)
-            if not value:
-                continue
-            path = Path(str(value)).expanduser()
-            if not path.is_absolute():
-                OmegaConf.update(cfg, key, str((SERVER_ROOT / path).resolve()), merge=True)
+        from xiconwam.model_config import resolve_model_paths, video_backbone
+
+        # Evaluation serves free-form instructions through the selected tower.
+        video_backbone(cfg.model).load_text_encoder = True
+        resolve_model_paths(cfg.model, SERVER_ROOT)
         mixed = str(OmegaConf.select(cfg, "mixed_precision") or "bf16").lower()
         dtype = {
             "bf16": torch.bfloat16,

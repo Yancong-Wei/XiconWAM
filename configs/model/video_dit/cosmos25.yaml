@@ -1,21 +1,32 @@
 name: cosmos25
+from_scratch: false
 model_id: ./playground/pretrained_models/Cosmos-Predict2.5-2B
 reason_model_id: ./playground/pretrained_models/Cosmos-Reason1-7B
 tokenizer_max_len: 128
 load_text_encoder: false
 text_encoder_id: cosmos_reason1_7b
-text_dim: 1024
+text_dim: ${.dit_config.context_dim}
 attention_backend: auto
 use_gradient_checkpointing: false
 # Options: first_frame_causal, per_frame_causal, bidirectional. Keep first_frame_causal by default.
 video_attention_mask_mode: first_frame_causal
-num_layers: 28
-num_heads: 16
+num_layers: ${.dit_config.num_layers}
+num_heads: ${.dit_config.num_heads}
 attn_head_dim: 128
-hidden_dim: 2048
-freq_dim: 2048
-video_hidden_layer: 16
-action_dit_pretrained_path: ./playground/pretrained_models/ActionDiT_Cosmos25_2b.pt
+hidden_dim: ${.dit_config.hidden_size}
+freq_dim: ${.dit_config.hidden_size}
+
+dit_config:
+  in_channels: 18
+  out_channels: 16
+  hidden_size: 2048
+  context_dim: 1024
+  reason_context_dim: 100352
+  num_layers: 28
+  num_heads: 16
+  intermediate_size: 8192
+  adaln_lora_dim: 256
+  patch_size: [1, 2, 2]
 
 video_scheduler:
   family: flow_unipc
@@ -26,25 +37,6 @@ video_scheduler:
   conditional_frame_timestep: 0.0001
   training_weight: uniform
   use_karras_sigmas: true
-loss:
-  lambda_video: 1.0
-  lambda_action: 1.0
-action_expert:
-  preset: standard
-  cross_attention: true
-  action_dim: 48
-  projector_hidden_dim: 64
-  hidden_dim: 1024
-  ffn_dim: 4096
-  num_heads: ${model.backbone.num_heads}
-  attn_head_dim: ${model.backbone.attn_head_dim}
-  num_layers: ${model.backbone.num_layers}
-  text_dim: ${model.backbone.text_dim}
-  freq_dim: ${model.backbone.freq_dim}
-  eps: 1.0e-06
-  attention_backend: ${model.backbone.attention_backend}
-  use_gradient_checkpointing: ${model.backbone.use_gradient_checkpointing}
-
 lora_target_modules:
   - self_attn.q_proj
   - self_attn.k_proj
@@ -56,3 +48,10 @@ lora_target_modules:
   - cross_attn.output_proj
   - mlp.layer1
   - mlp.layer2
+
+# Adapter settings belong to the video component; frozen encoders are not adapted.
+lora:
+  enable: false
+  target: video
+  rank: 16
+  alpha: 32

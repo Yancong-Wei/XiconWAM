@@ -11,6 +11,7 @@ Example:
   python scripts/compute_dataset_stats.py --config-name task/robodojo_wan
   python scripts/compute_dataset_stats.py --output playground/datasets/robodojo/dataset_stats.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -52,7 +53,10 @@ def main() -> None:
 
     from xiconwam.data.lerobot.base_lerobot_dataset import BaseLerobotDataset
     from xiconwam.data.discovery import discover_dataset_dirs
-    from xiconwam.data.lerobot.robot_video_dataset import trained_window
+    from xiconwam.data.lerobot.robot_video_dataset import (
+        configured_window_steps,
+        trained_window,
+    )
     from xiconwam.data.lerobot.utils.normalizer import save_dataset_stats_to_json
     from xiconwam.kit.config_resolvers import register_default_resolvers
 
@@ -76,7 +80,7 @@ def main() -> None:
         output = (ROOT / output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    num_frames = int(train_cfg.num_frames)
+    num_frames = configured_window_steps(train_cfg)
     ratio = int(train_cfg.action_video_freq_ratio)
     _, action_steps = trained_window(num_frames, ratio)
     shape_meta = OmegaConf.to_container(train_cfg.shape_meta, resolve=True)

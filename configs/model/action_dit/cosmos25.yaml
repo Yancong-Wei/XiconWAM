@@ -1,0 +1,23 @@
+name: actiondit
+checkpoint: null
+from_scratch: false
+pretrained_path: ./playground/pretrained_models/ActionDiT_Cosmos25_2b.pt
+dit_config:
+  preset: standard
+  action_dim: 48
+  hidden_dim: 1024
+  num_heads: ${model.video_dit.num_heads}
+  attn_head_dim: ${model.video_dit.attn_head_dim}
+  text_dim: ${model.video_dit.text_dim}
+  attention_backend: ${model.video_dit.attention_backend}
+  use_gradient_checkpointing: false
+  cross_attention: true
+  projector_hidden_dim: 64
+  ffn_dim: 4096
+  num_layers: ${model.video_dit.num_layers}
+  freq_dim: ${model.video_dit.freq_dim}
+  eps: 1.0e-06
+scheduler:
+  train_shift: 5.0
+  infer_shift: 5.0
+  num_train_timesteps: 1000
