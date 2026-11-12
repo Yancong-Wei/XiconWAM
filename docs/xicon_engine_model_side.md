@@ -1,6 +1,6 @@
 # XiconWAM 模型端接入 Xicon Engine
 
-当前优先级是**训练后的开环验证**。现阶段尚无训练完成的 checkpoint；本文把可运行的通信/评估基础设施和未来的模型效果验收分开。
+当前优先级是**训练后的开环验证**。当前文档没有提供经过本轮验收的真实 checkpoint；本文把可运行的通信/评估基础设施和未来的模型效果验收分开。
 
 ## 分工与两条部署路线
 
@@ -50,7 +50,7 @@ xiconwam-serve \
 `--contract` 是完整 `PolicyInfo` JSON，字段包括 name、horizon、action_dim、state_dim、fps、schema_id、camera_keys、action_names、action_units 和 representation。当前 RoboDojo recipe 是：
 
 - action_dim/state_dim 为 **14**；内部 48 维头由训练 `unify_action_map` 映射及逆映射。
-- `num_frames=33`、ratio=4 对应 **9 个视频帧、32 步动作 horizon**。不是观测 33 帧，也不从返回动作再裁掉 32 行。
+- `window_steps=33`、ratio=4 对应 **9 个视频帧、32 步动作 horizon**。旧 run 中该字段名为 `num_frames`，并不是 33 个视频帧，也不从返回动作再裁掉 32 行。
 - camera_keys 按训练顺序为 `cam_high, cam_left_wrist, cam_right_wrist`。图像经训练 processor 的验证变换缩放，拼成 384×320，归一化到 [-1,1]。
 - fps 必须来自数据采样频率；关节/夹爪 names 和 units 必须由具体数据/机器人协议确认。不要把夹爪直接声明成 rad，也不要把示例 fixture schema 用于真机。
 - representation 为 `absolute_joint_position`。支持无动作变换或 `RelativeJointTransform`；相对关节输出以本次原始物理状态还原。其他姿态/旋转变换当前会拒绝启动。
@@ -96,21 +96,10 @@ python -m deployment.engine_client \
 
 本次无真机运动授权，也没有接触硬件。CLI 的 hold fixture 只是通信工具，不是经过训练的机器人策略。
 
-## 检查结果与发布判断（2026-11-03）
+## 当前验证范围
 
-本机 macOS 验证：
+本仓库的当前检查结论见 [可靠性说明](reliability.md)。历史 Engine 构建、wheel 安装和机器人端 mock 联调的结果不作为当前版本的通过证据；Engine 属于外部依赖，其测试和发行记录由对应仓库维护。
 
-- Engine lint、format、55 项测试通过；覆盖独立进程通信、协议/reset、超时、单请求串行、调度、开环及错误情况。
-- sdist/wheel 构建及 `twine check --strict` 通过；干净临时环境安装 wheel 后，独立服务/客户端握手、sync/Future、reset 和关闭通过。
-- robot_control 现有 7 项集成测试通过，包含 mock adapter、仿真 adapter 和真实回环 WebSocket。
-- 新增 XiconWAM 适配测试覆盖状态裁剪、非连续 unify slots、反归一化、相对动作的原始参考、完整 chunk、文本 context、相机契约及真实 RPC 开环报告。
-- 新增 XiconWAM hold fixture → 真实 WebSocket → robot_control mock 执行循环，sync/async 均通过。
-- CPU 适配测试使用 Torch 2.7.1、Torchvision 0.22.1；尚无 Linux CUDA 权重推理、真实 RoboDojo 数据效果、XPolicyLab 打榜或硬件验收。
+无权重 hold / 合成记录只能验证通信与数据接口。发布和实际部署前仍需对应 wheel 的干净安装、真实 checkpoint 开环、RoboDojo 闭环及目标网络下的延迟验证。Engine 默认单客户端、单在途推理，不能直接作为多租户 GPU 服务。
 
-结论：**足以作为这两条基础链路的早期依赖，并制作固定 wheel 试用；目前的证据不足以称作稳定正式版。** Engine 本次仅调整多轴曲线图的标题留白，避免 14 轴图标题与第一行重叠；其原有未提交工作已保留。
-
-建议先做内部 wheel，再在具备账户/包名权限后发布 TestPyPI 预发布版，验收后再发布 PyPI。公开发布不是稳定性的来源；包版本、协议契约和验证证据才是。正式版前至少补齐 Linux/Python 3.10 的干净安装与全测、长时重连/故障压力、真实 checkpoint/留出数据开环，以及真实部署网络下的延迟分位数。真机验收单独进行。
-
-Engine 默认单客户端、单在途推理，不能当多租户 GPU 服务。XiconWAM 现有 checkpoint loader 部分分支允许 non-strict 权重载入；正式模型上线前还应收紧完整性校验，防止把缺权重的研究 checkpoint 当成完整策略。
-
-本次只构建和本机验证，没有上传 TestPyPI/PyPI，也没有确认包名归属。模型端和机器人端应先固定同一 artifact；上线后根据实际日志而非 Echo 的低延迟调整 H/K 和超时。
+完整原生策略权重现在严格检查缺失、额外键和张量形状；历史 LoRA 文件的检查限制见可靠性说明。独立视频权重必须通过显式组件接口加载。模型包校验只证明文件完整性，不能证明模型效果或机器人安全。

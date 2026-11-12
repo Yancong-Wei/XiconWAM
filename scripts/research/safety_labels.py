@@ -1,6 +1,6 @@
 """Offline labels for observed rollouts, not a runtime safety controller.
 
-One JSON object per episode; see docs/safety_research_plan.md for the contract.
+One JSON object per episode; see docs/research/safety_research_plan.md for the contract.
 Uses only the Python standard library. Future horizons are measured in actions.
 """
 from __future__ import annotations
